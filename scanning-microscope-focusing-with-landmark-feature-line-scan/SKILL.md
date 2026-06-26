@@ -31,11 +31,17 @@ You will also need the following information:
   interest (ROI) containing the landmark;
   you need it for later image registration in order to track the feature if 
   the image drifts after optics parameter adjustment. If it is not available,
-  ask the user for the position to conduct a 2D scan to acquire that image.
+  ask the user for the position and size to conduct a 2D scan to acquire that image.
 - The position of the first line scan across the landmark feature. It might be
   unavailable until the first 2D scan is completed because the line scan coordinates
   need to be read from the image. If this is the case, ask the user to confirm the
   line scan positions after the first 2D scan is done.
+- Other arguments (in addition to positions) that you should use for 2D scans and
+  line scans. Often, these arguments are kept constant throughout the process, unless
+  explicitly specified otherwise. These arguments may include:
+  - The dwell time (exposure time for collecting each data point; may have default)
+  - Step size x/y (the distance between adjacent scan points)
+  - Line scan length
 - The initial parameter(s) of the focusing optics. It might be a scalar number such
   as the z position of a zone plate, or it can be a vector of multiple parameters.
 - The range to adjust the optics parameters for searching for the optimal focus.
@@ -44,6 +50,16 @@ You will also need the following information:
 - (Optional) The desired precision of the optimal parameters (e.g., 0.5 micron).
 
 If any of these tools or non-optional information are missing, ask the user.
+
+## Tool usage
+
+With the tools for instrument control at the APS 2-ID-D beamline which you will use
+in this task, you would often call them as follows:
+- `acquire_image(<width>, <height>, <x_center>, <y_center>, <stepsize_x>, <stepsize_y>)`
+- `acquire_line_scan("x", <length>, sample_x=<x_center>, sample_y=<y_center>)`
+  - Unless explicitly specified otherwise, always use "x" for `positioner_name`. This
+    runs a spatial scan and sets the scan direction to horizontal.
+  - `sample_x/y` set the center position of the scan line.
 
 ## Procedure
 
