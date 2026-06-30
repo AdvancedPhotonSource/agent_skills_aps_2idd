@@ -23,11 +23,16 @@ configurations to achieve the goal.
 
 To perform ROI search effectively, you need:
 
-- `acquire_image`: Acquire an image at a specified location and with a specified
-  field of view.
+- An image acquisition tool: Acquire an image at a specified location and with a specified
+  field of view. This tool might be called `acquire_image` but could also be something
+  else. If you see a tool suggesting the same capability, confirm with the user.
 
 If this tool is unavailable, notify the user that the ROI-search workflow cannot
 be executed as described and explain what capability is missing.
+
+Depending on the agent harness, you may or may not have another tool called
+`image_captioning.toggle_auto_image_captioner`. This tool is optional. It is
+okay if this tool is not available.
 
 ## Required Inputs
 
@@ -48,6 +53,17 @@ If any essential information is missing, ask the user for it before proceeding.
 Check the tool schema as well, because the exact acquisition arguments may vary
 across instruments. For example, some image acquisition tools may not take an
 FOV size.
+
+## Preparation
+
+Before starting the search, if you have the `image_captioning.toggle_auto_image_captioner`,
+call it and set the value to `True`:
+```
+image_captioning.toggle_auto_image_captioner(True)
+```
+This enable the agentic harness to automatically generate a caption or description
+of all tool-returned images. This should give you an additional layer of proof
+when examining images.
 
 ## Search Strategy
 
@@ -95,7 +111,17 @@ instructions. If the image acquisition tool does not support the specified
 strategy, notify the user and suggest falling back to the default
 acquire-check-move snake pattern.
 
-Use your Python coding tool creatively and flexibly to perform necessary
+When examining the acquired images to check whether the feature is present
+or to understand the image content, prefer using your own vision capability.
+However, multimodal attention occasionally fails which may cause you to "see"
+a corrupted, incomplete, or meaningless image even though the image is good.
+If you have a `image_captioning.toggle_auto_image_captioner` tool, turn it on
+so that another LLM with clean context can automatically generate a text
+description of the image. If the image you see appears abnormal but the text
+description suggests meaningful content, **trust the text description instead of your own
+vision**.
+
+Additionally, you may use your Python coding tool creatively and flexibly to perform necessary
 analyses on the fly or to visualize the search state. For example, at the end
 of a coarse or random search pass, you can generate a large image with local
 images placed at their respective locations. Use that overview of the covered
