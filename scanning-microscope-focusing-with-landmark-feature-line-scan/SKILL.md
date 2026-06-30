@@ -202,7 +202,7 @@ lot of fluctuations in the data points, do not blindly choose the minimum FWHM. 
 fit a quadratic function and plot the data points and the fit to help you decide where
 the true optimum is.
 
-### Coase-to-fine search
+### Coarse-to-fine search
 
 Use a reasonable step size at the beginning to roughly locate the optimum, then conduct
 finer search around the vicinity of the optimum to precisely locate it. For example,
@@ -238,6 +238,27 @@ and do not reverse direction. Measure at -194 next. If needed, continue to -195 
 a nearby point until the rise is sustained or disproved. Only then bracket the optimum and
 begin the fine search. A quadratic fit may support this decision, but it does not override
 the requirement for measurements beyond a one-point apparent turnover.
+
+## Special data handling
+
+### Reading pre-collected image
+
+Sometimes, the user might ask you to load a pre-collected image as the first 2D scan
+instead of recollecting the scan. At the 2-ID-D beamline, the pre-colleced image often
+comes in the form of MDA files. To locate it, call the `aps2idd_control.get_save_data_path`
+tool to get the parent directory of that MDA file, then locate the file based on
+the filename or scan ID given by the user. After locating the file, call
+`aps2idd_control.process_image` to convert this file to NPY. You can then use
+that NPY file for subsequent operations like image registration.
+
+If the user indeed tells you to use a pre-collected image as the first 2D scan,
+always confirm with the user about the scan position, scan area size and scan step size used
+for that image. This information is needed for subsequent data acquisitions. 
+Also, check the size of the NPY file and make sure that its shape matches the
+number of data points that would be generated using that scan area size and
+step size. It is important to ensure that the subsequent 2D scans have the same
+size and pixel size as the first one in order for the image registration tool
+to work.
 
 ## Handling exceptions
 
