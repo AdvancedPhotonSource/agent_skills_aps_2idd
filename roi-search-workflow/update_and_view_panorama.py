@@ -110,8 +110,7 @@ def main():
     print(f"Saved PNG:  {out_png}")
     print(f"Updated extent: y=({out_y0}, {out_y1}), x=({out_x0}, {out_x1})")
     
-    # If executing the script with the Python coding tool, print the output PNG path
-    # at the end to allow the harness to display it.
+    # Open the printed PNG path with an available image-viewing capability.
     print(out_png)
 
 

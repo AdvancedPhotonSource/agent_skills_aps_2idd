@@ -21,10 +21,9 @@ the source of truth. This skill is about *calling the tool, interpreting the
 result, and responding*.
 
 Use this skill when the user asks you to check beamline/scan health once, to keep
-watching it during an experiment, or to react when a scan stalls. For the generic
-"sleep, re-check, repeat" loop mechanics, compose this skill with the
-`monitor-status` skill: this skill defines *the monitoring action and the
-response actions*; `monitor-status` defines *the loop*.
+watching it during an experiment, or to react when a scan stalls. For continuous
+monitoring, check the status, perform the agreed reporting or correction actions
+for any anomalies, wait for the specified interval, and check again.
 
 ## What this skill needs
 
@@ -80,21 +79,25 @@ anomaly kind. Sensible defaults:
 ### 3. Loop parameters (only when continuously monitoring)
 
 If the user wants ongoing monitoring rather than a one-shot check, get the
-**interval** between checks and the **number of checks** (default: indefinite),
-then follow the `monitor-status` skill for the sleep/re-check loop.
+**interval** between checks and the **number of checks** (default: indefinite).
+Use an available waiting capability, such as a sleep tool, a shell `sleep`
+command, or Python's `time.sleep`. Keep waits within the execution interface's
+limits, splitting longer intervals into shorter waits when necessary. If runtime
+limits prevent continued monitoring, tell the user that monitoring has stopped.
 
 ## Procedure
 
 1. If the user wants continuous monitoring, confirm the response actions above
-   and the interval/count, then follow `monitor-status` for the loop mechanics.
+   and the interval/count.
 2. Call `aps2idd_control.evaluate_snapshot`.
 3. Read `overall` and `anomalies`. For each anomaly, perform the agreed response
    action for its `kind`. Report clearly to the user what was found and what you
    did, labeling severities.
-4. If this is a one-shot check, summarize and stop. If continuous, enter the
-   sleep phase (per `monitor-status`) and return to step 2 when you wake up.
-5. Repeat until the user's check count is reached, the user stops you, or an
-   anomaly's agreed action is "stop and wait for instructions."
+4. If this is a one-shot check, summarize and stop. For continuous monitoring,
+   stop if the user's check count is reached, the user stops you, or an anomaly's
+   agreed action is "stop and wait for instructions."
+5. Otherwise, wait for the specified interval, then return to step 2. When no
+   anomalies are found, continue this wait-and-check loop.
 
 ## Anomaly criteria (implemented in `control_suite_mcp_aps_2idd/health.py`)
 

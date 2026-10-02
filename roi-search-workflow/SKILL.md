@@ -30,9 +30,8 @@ To perform ROI search effectively, you need:
 If this tool is unavailable, notify the user that the ROI-search workflow cannot
 be executed as described and explain what capability is missing.
 
-Depending on the agent harness, you may or may not have another tool called
-`image_captioning.toggle_auto_image_captioner`. This tool is optional. It is
-okay if this tool is not available.
+An image-captioning capability is optional and can provide text descriptions
+to assist with examining images.
 
 ## Required Inputs
 
@@ -56,14 +55,9 @@ FOV size.
 
 ## Preparation
 
-Before starting the search, if you have the `image_captioning.toggle_auto_image_captioner`,
-call it and set the value to `True`:
-```
-image_captioning.toggle_auto_image_captioner(True)
-```
-This enable the agentic harness to automatically generate a caption or description
-of all tool-returned images. This should give you an additional layer of proof
-when examining images.
+Before starting the search, enable image captioning if it is available through
+the current tools or harness settings. Use the captions when examining acquired
+images.
 
 ## Search Strategy
 
@@ -115,15 +109,17 @@ When examining the acquired images to check whether the feature is present
 or to understand the image content, prefer using your own vision capability.
 However, multimodal attention occasionally fails which may cause you to "see"
 a corrupted, incomplete, or meaningless image even though the image is good.
-If you have a `image_captioning.toggle_auto_image_captioner` tool, turn it on
-so that another LLM with clean context can automatically generate a text
-description of the image. If the image you see appears abnormal but the text
-description suggests meaningful content, **trust the text description instead of your own
-vision**.
+If a caption is available and disagrees with your visual interpretation of the
+image, **trust the caption**.
 
-Additionally, you may use your Python coding tool creatively and flexibly to perform necessary
-analyses on the fly or to visualize the search state. For example, at the end
-of a coarse or random search pass, you can generate a large image with local
+When more than 10 images are in the conversation context, warn the user of
+potential performance degradation. If the harness supports image pruning, ask
+the user to enable it.
+
+Additionally, you may run Python through any available execution interface,
+including a shell, to perform analyses on the fly or visualize the search state.
+For example, at the end of a coarse or random search pass, you can generate a
+large image with local
 images placed at their respective locations. Use that overview of the covered
 sample area to help determine where to scan next. Some analyses may require
 access to raw image data stored on disk in formats such as NPY, TIFF, or HDF5.
@@ -134,15 +130,18 @@ not guaranteed.
 
 ### Visualization
 
-Use your Python coding tool to create visualizations that help you understand
-the search state. For example, if you have access to the raw image data,
-you can generate a script that creates a large image buffer, and place the
+Run Python through an available execution interface, including a shell, to
+create visualizations that help you understand the search state. For example,
+if you have access to the raw image data, you can generate a script that creates
+a large image buffer, and place the
 acquired images into that buffer at their respective locations, stitching
 them together into a panorama of the searched area, and update the image
 after each acquisition. This can help you see which areas have been covered and
 identify promising regions to focus on in subsequent search passes.
 See `update_and_view_panorama.py` in the skill directory for an example of how 
-to do this.
+to do this. After generating the panorama, explicitly open the saved PNG using
+an available image-viewing capability and inspect it before using it to choose
+the next scan location.
 
 ## Finalization
 

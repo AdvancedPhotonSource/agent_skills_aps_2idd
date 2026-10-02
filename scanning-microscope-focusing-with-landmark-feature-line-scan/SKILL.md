@@ -117,11 +117,12 @@ Overall, the procedure consists of the following steps:
    new_line_scan_position = previous_line_scan_position + stage_position_correction
    ```
 
-   **Use the `evaluate_python_expression` tool for every drift-correction
-   calculation. Do not calculate the correction mentally.** Evaluate each coordinate
-   explicitly when the positions are vectors. State the input values and use the tool's
+   **Use an available computation tool for every drift-correction calculation,
+   such as Python execution or a shell command running Python or another calculator
+   that supports floating-point arithmetic. Do not calculate the correction mentally.**
+   Evaluate each coordinate explicitly when the positions are vectors. State the input values and use the tool's
    returned result for `stage_position_correction`, `new_line_scan_position`, and later
-   `new_2d_scan_position`. Only calculate manually if that tool is unavailable, and say
+   `new_2d_scan_position`. Only calculate manually if no computation tool is available, and say
    that you are using the fallback.
 
    This reduces to simply subtracting `registration_offset` only when the current and last
@@ -181,8 +182,9 @@ to help with your search:
   optimum of the acquisition function to determine the next step. However, if BO suggests
   a new parameter that is very far away from the current values, clip the change to a
   smaller step length to prevent unmanageable drift of the sample images.
-- Use fitting. You may use your Python tool to fit the data points (e.g., with a 
-  quadratic function) to estimate the optimum.
+- Use fitting. You may run Python through any available execution interface,
+  including a shell, to fit the data points (e.g., with a quadratic function)
+  to estimate the optimum.
   If you use the fit to estimate the optimum, make sure you constrain the step length
   like in the case of BO.
 
@@ -293,6 +295,4 @@ The following images demonstrate a few cases where the line scan path goes "off"
   When setting parameters, explain why you are setting them to those values. When running line scan
   or image acquisition, explain why you are doing them at the chosen positions.
 - You should perform the focusing as autonomous as possible. Unless major exceptions happen, do
-  not request human intervention during the process. Before the focusing process concludes,
-  avoid using the bash tool because it would ask for user approval and may cause the process to
-  hang.
+  not request human intervention during the process.
