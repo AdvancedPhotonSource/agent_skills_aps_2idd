@@ -167,6 +167,57 @@ baseline before judging a motor trend. Quantitative image measures may support
 inspection when suitable raw data are available, but total intensity or a single
 symmetry score must not override visible internal stray signal or a missing sector.
 
+### Quantitative evaluation
+
+Use [scripts/evaluate_alignment.py](scripts/evaluate_alignment.py) to measure
+concentric boundary geometry and integrated hole intensity. Dependencies are
+managed by the local `uv` project in `scripts/`. From the skill directory:
+
+```sh
+uv sync --project scripts --locked
+uv run --project scripts --locked python scripts/evaluate_alignment.py IMAGE --output metrics.json
+uv run --project scripts --locked python scripts/evaluate_alignment.py IMAGE --inner-axes 38 34 --outer-axes 98 94 --output metrics.json
+```
+
+The script fits two ellipses sharing a center and orientation, with independently
+fitted semiaxes. Supply both `--inner-axes A B` and `--outer-axes A B` to hold the
+four semiaxes fixed and fit only the center and common orientation. Omit both
+options to fit the semiaxes as well. Fixed semiaxes keep the hole area comparable
+across an alignment sequence. The example dimensions are illustrative. These are
+semiaxis lengths in pixels, not diameters; corresponding inner semiaxes must be
+smaller than the outer ones. `angle_degrees` describes the A-axis clockwise from
+image +x toward image +y, modulo 180°. A and B need not be ordered by length.
+The fit uses ellipse normals to classify edges and integrates the elliptical
+hole. Nearly circular ellipses have poorly determined orientation. Extra shape
+freedom can absorb actual misalignment, so inspect fitted aspect ratios and the
+image as well as the residual.
+
+The script detects Canny edges, distinguishes inward and outward intensity
+transitions, and fits the concentric ellipses. Lower scores are better:
+
+- `primary_metric`: mean inner/outer circumference-to-edge RMS distance divided
+  by outer equal-area radius (√(AB) for an ellipse), plus a penalty for unsupported
+  angular coverage. Both boundaries receive equal weight, with 360 true polar-angle
+  samples per boundary and a default coverage weight λ = 0.5. This measures
+  geometry and completeness.
+- `secondary_metric`: background-subtracted intensity summed inside the inner
+  boundary, optionally divided by `--intensity-normalizer`. Use `--background`
+  for a known scalar detector background. The input intensity scale is preserved;
+  RGB images use luminance weights. Display-scaled images do not give photon counts.
+
+An invalid fit sets both metrics to infinity (encoded as `"inf"` in JSON) and
+provides failure reasons. Candidate boundaries and `geometry_score` may remain for
+diagnosis. A valid fit establishes measurable geometry, not successful alignment.
+Review boundary RMS errors, angular coverage, hole mean, and hole area alongside
+the scores. The support thresholds are adjustable prototype defaults; use
+`--help` for options. Texture, saturation, and soft edges can bias the fit.
+
+Prefer a meaningful primary improvement; use the secondary metric to distinguish
+primary scores within a tolerance established from repeated unchanged-position
+images. Require a meaningful secondary difference as well. Record scores and fit
+validity in the textual trajectory, retaining the visual checks for angular
+brightness balance and localized hole contamination.
+
 ## Completion and stopping
 
 Declare good alignment when the ring is continuous and approximately concentric,
