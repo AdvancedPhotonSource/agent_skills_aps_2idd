@@ -14,10 +14,9 @@ from evaluate_alignment import Config
 
 
 def calibration():
-    return dict(version=1, units="um", evaluator=asdict(Config(inner_axes=(3, 3), outer_axes=(8, 8))),
-                calibration_bounds=[[-15, 15], [-15, 15]], max_step=5., eta=1.,
-                motor_from_error=[[1., 0.], [0., 1.]], min_vector=.1, min_coverage=.5,
-                max_center_shift=10., reference_center=[20., 20.], reference_error=[0., 0.],
+    return dict(version=2, units="um", evaluator=asdict(Config(inner_axes=(3, 3), outer_axes=(8, 8))),
+                calibration_bounds=[[-15, 15], [-15, 15]], gain_max_step=5., eta=1.,
+                jacobian=[[1., 0.], [0., 1.]], reference_center=[20., 20.], reference_error=[0., 0.],
                 image_shape=[40, 40], centroid_percentile=10.)
 
 
@@ -65,7 +64,7 @@ def test_calibration_gain_and_flipped_coupled_axes():
     assert fit["eta"] == 1.
     assert fit["diagnostics"]["held_out_toward_reference_fraction"] == 1.
     assert np.allclose(fit["jacobian"], j)
-    assert np.allclose(np.array(fit["motor_from_error"]) @ j, np.eye(2))
+    assert np.allclose(np.linalg.solve(fit["jacobian"], p[0] @ j.T), p[0])
 
 
 def test_calibration_rejects_degenerate_response():
@@ -107,7 +106,7 @@ def test_axis_passes_then_bo_and_confirmed_target(tmp_path):
 def test_rejected_trial_restores_before_further_search(tmp_path):
     backend = SyntheticBackend([10, 0])
     c = calibration()
-    c["motor_from_error"] = [[-1., 0.], [0., 1.]]
+    c["jacobian"] = [[-1., 0.], [0., 1.]]
     controller = Controller(c, settings(max_acquisitions=9), backend, tmp_path / "log",
                             lambda p, c: observation(p))
     result = controller.run()
@@ -207,3 +206,79 @@ def test_continuous_candidates_respect_symmetric_box_and_step_limit(tmp_path):
     assert np.all(np.abs(delta) <= [2, 3])
     assert np.all(np.linalg.norm(delta, axis=1) <= 5)
     assert np.all(delta.min(axis=0) < 0) and np.all(delta.max(axis=0) > 0)
+
+
+def test_direction_solves_jacobian_and_uses_runtime_thresholds(tmp_path):
+    cal = calibration()
+    j = np.array([[-2., .3], [.7, 1.5]])
+    cal['jacobian'] = j.tolist()
+    obs = observation([4, 2])
+    obs['error'] = (j @ [4, 2]).tolist()
+    c = Controller(cal, settings(eta=.5), SyntheticBackend([4, 2]), tmp_path / 'normal')
+    assert c.direction(obs, 0) == (-1, 2.)
+    assert c.direction(obs, 1) == (-1, 1.)
+    c = Controller(cal, settings(min_vector=100), SyntheticBackend([4, 2]), tmp_path / 'fallback')
+    assert c.direction(obs, 0) == (1, 5.)
+
+
+@pytest.mark.parametrize('field,value', [('min_vector', -1), ('min_coverage', 1.1),
+                                         ('max_center_shift', 0), ('min_vector', float('nan'))])
+def test_runtime_confidence_settings_validated(field, value):
+    with pytest.raises(ValueError):
+        settings(**{field: value}).validate(calibration())
+
+
+def test_old_calibration_has_actionable_error():
+    cal = calibration()
+    cal['version'] = 1
+    with pytest.raises(ValueError, match='regenerate with calibrate_alignment.py'):
+        settings().validate(cal)
+
+
+def test_calibration_cli_outputs_independently_usable_files(tmp_path, monkeypatch):
+    import calibrate_alignment as module
+    positions = [(x, y) for x in [-4, 0, 4] for y in [-4, 0, 4]]
+    paths = {str(tmp_path / f'{i}.tiff'): p for i, p in enumerate(positions)}
+    j = np.array([[-2., .3], [.7, 1.5]])
+    offset = np.array([.2, -.3])
+    def measured(path, cal):
+        obs = observation(paths[str(path)])
+        obs['image'] = str(path)
+        obs['error'] = (j @ paths[str(path)] + offset).tolist()
+        return obs
+    reference_metrics = observation([0, 0])['metrics']
+    reference_metrics['fit']['inner_axes'] = [3., 3.]
+    monkeypatch.setattr(module, 'read_image', lambda path: np.zeros((40, 40)))
+    monkeypatch.setattr(module, 'evaluate', lambda image, config: reference_metrics)
+    monkeypatch.setattr(module, 'measure', measured)
+    manifest = tmp_path / 'images.json'
+    manifest.write_text(json.dumps({'units': 'um', 'samples': [
+        {'position': p, 'image': path} for path, p in paths.items()]}))
+    output = tmp_path / 'calibration.json'
+    monkeypatch.setattr(sys, 'argv', ['calibrate_alignment.py', str(manifest),
+        '--reference-position', '0', '0', '--max-step', '4', '--output', str(output),
+        '--eta-grid', '.25', '.5', '1', '--min-vector', '2', '--min-coverage', '.7',
+        '--max-center-shift', '12'])
+    module.main()
+    cal = json.loads(output.read_text())
+    runtime = json.loads((tmp_path / 'calibration.alignment.json').read_text())
+    report = json.loads((tmp_path / 'calibration.report.json').read_text())
+    assert np.allclose(cal['jacobian'], j)
+    assert np.allclose(cal['reference_error'], offset)
+    assert 'diagnostics' not in cal and 'motor_from_error' not in cal
+    assert all(key not in cal for key in ['min_vector', 'min_coverage', 'max_center_shift',
+                                         'max_step', 'reference_m2', 'reference_position'])
+    assert report['diagnostics']['held_out_positions'] == 8
+    assert runtime['min_vector'] == 2 and runtime['min_coverage'] == .7
+    assert runtime['max_center_shift'] == 12 and runtime['max_step'] == 4
+    controller = Controller(cal, Settings(**runtime), SyntheticBackend([4, 0]),
+                            tmp_path / 'trajectory', lambda p, c: observation(p))
+    assert controller.direction(dict(observation([4, 0]), error=(j @ [4, 0]).tolist()), 0)[0] == -1
+
+
+def test_bundled_calibration_and_config_are_compatible():
+    root = Path(__file__).resolve().parents[1]
+    cal = json.loads((root / 'calibration.json').read_text())
+    runtime = json.loads((root / 'calibration.alignment.json').read_text())
+    Settings(**runtime).validate(cal)
+    assert cal['eta'] == 1.5

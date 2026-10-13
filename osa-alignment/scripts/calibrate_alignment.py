@@ -95,7 +95,6 @@ def fit_response(positions, errors, gains, max_step, max_condition=100.0):
     condition = float(np.linalg.cond(jacobian))
     if not np.isfinite(condition) or condition > max_condition:
         raise ValueError(f"Motor-to-centroid response is ill-conditioned: {condition:g}")
-    inverse = np.linalg.inv(jacobian)
     corrections, held_positions = [], []
     for position in np.unique(p, axis=0):
         held = np.all(p == position, axis=1)
@@ -116,7 +115,7 @@ def fit_response(positions, errors, gains, max_step, max_condition=100.0):
     best = min(scores, key=lambda row: row["held_out_position_mse"])
     if best["held_out_position_mse"] >= baseline:
         raise ValueError("No candidate eta improves held-out motor-position error")
-    return {"jacobian": jacobian.tolist(), "motor_from_error": inverse.tolist(),
+    return {"jacobian": jacobian.tolist(),
             "eta": best["eta"], "diagnostics": {
                 "condition_number": condition, "usable_samples": len(p),
                 "held_out_positions": len(held_positions),
@@ -146,7 +145,7 @@ def calibrate(manifest, reference, config, *, gains, max_step, coarse_threshold=
         raise ValueError("Reference image must have a valid ellipse fit")
     config = replace(config, inner_axes=tuple(first["fit"]["inner_axes"]),
                      outer_axes=tuple(first["fit"]["outer_axes"]))
-    artifact = {"version": 1, "units": manifest["units"], "evaluator": asdict(config),
+    artifact = {"version": 2, "units": manifest["units"], "evaluator": asdict(config),
                 "centroid_percentile": centroid_percentile, "reference_error": [0., 0.]}
     observations = []
     for row in manifest["samples"]:
@@ -179,15 +178,29 @@ def calibrate(manifest, reference, config, *, gains, max_step, coarse_threshold=
         if usable:
             positions.append(np.asarray(obs["position"]) - reference)
             errors.append(e)
-    artifact.update(fit_response(positions, errors, gains, max_step, max_condition))
-    artifact.update(reference_position=reference.tolist(), reference_error=reference_error.tolist(),
-                    reference_center=center.tolist(), image_shape=first["image_shape"],
-                    reference_m2=float(np.mean([o["metrics"]["secondary_metric"] for o in reference_obs])),
-                    max_step=max_step, coarse_threshold=coarse_threshold,
-                    min_vector=min_vector, min_coverage=min_coverage, max_center_shift=max_center_shift,
+    response = fit_response(positions, errors, gains, max_step, max_condition)
+    artifact.update(jacobian=response["jacobian"], eta=response["eta"],
+                    reference_error=reference_error.tolist(), reference_center=center.tolist(),
+                    image_shape=first["image_shape"], gain_max_step=max_step,
                     calibration_bounds=np.array([np.min([o["position"] for o in observations], axis=0),
                                                  np.max([o["position"] for o in observations], axis=0)]).T.tolist())
-    return artifact, observations
+    report = {"diagnostics": response["diagnostics"],
+              "reference_position": reference.tolist(),
+              "reference_m2": float(np.mean([o["metrics"]["secondary_metric"] for o in reference_obs])),
+              "calibration_options": {"eta_grid": gains, "max_step": max_step,
+                  "coarse_threshold": coarse_threshold, "min_vector": min_vector,
+                  "min_coverage": min_coverage, "max_center_shift": max_center_shift,
+                  "max_condition": max_condition}}
+    return artifact, report, observations
+
+
+def alignment_settings(calibration, report):
+    """Suggested runtime settings matching the calibration's envelope and filters."""
+    options = report["calibration_options"]
+    return {"units": calibration["units"], "bounds": calibration["calibration_bounds"],
+            "max_step": calibration["gain_max_step"],
+            "min_step": min(0.5, calibration["gain_max_step"]),
+            **{name: options[name] for name in ("min_vector", "min_coverage", "max_center_shift")}}
 
 
 def main():
@@ -196,6 +209,9 @@ def main():
     parser.add_argument("--reference-position", type=float, nargs=2, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--observations", type=Path)
+    parser.add_argument("--report", type=Path, help="Diagnostics JSON; default: OUTPUT stem + .report.json")
+    parser.add_argument("--alignment-config", type=Path,
+                        help="Suggested runtime settings; default: OUTPUT stem + .alignment.json")
     parser.add_argument("--evaluator-config", type=Path, help="JSON object with evaluate_alignment.Config fields")
     parser.add_argument("--max-step", type=float, required=True, help="Motor units; Euclidean displacement limit")
     parser.add_argument("--eta-grid", nargs="+", type=float, default=[0.25, 0.5, 0.75, 1., 1.5, 2.])
@@ -206,17 +222,24 @@ def main():
     parser.add_argument("--max-center-shift", type=float, default=40.)
     parser.add_argument("--max-condition", type=float, default=100.)
     args = parser.parse_args()
+    report_path = args.report or args.output.with_suffix(".report.json")
+    settings_path = args.alignment_config or args.output.with_suffix(".alignment.json")
+    paths = [args.output, report_path, settings_path] + ([args.observations] if args.observations else [])
+    if len({path.resolve() for path in paths}) != len(paths):
+        parser.error("Calibration, report, alignment config, and observations need distinct output paths")
     config = Config(**(json.loads(args.evaluator_config.read_text()) if args.evaluator_config else {}))
-    artifact, observations = calibrate(load_manifest(args.manifest), args.reference_position, config,
+    artifact, report, observations = calibrate(load_manifest(args.manifest), args.reference_position, config,
         gains=args.eta_grid, max_step=args.max_step, coarse_threshold=args.coarse_threshold,
         centroid_percentile=args.centroid_percentile, min_vector=args.min_vector,
         min_coverage=args.min_coverage, max_center_shift=args.max_center_shift,
         max_condition=args.max_condition)
     write_json(args.output, artifact)
+    write_json(report_path, report)
+    write_json(settings_path, alignment_settings(artifact, report))
     if args.observations:
         write_json(args.observations, observations)
-    print(json.dumps(artifact["diagnostics"], indent=2))
-    print(f"Selected eta={artifact['eta']:g}; saved {args.output}")
+    print(json.dumps(report["diagnostics"], indent=2))
+    print(f"Selected eta={artifact['eta']:g}; saved {args.output}, {report_path}, {settings_path}")
 
 
 if __name__ == "__main__":

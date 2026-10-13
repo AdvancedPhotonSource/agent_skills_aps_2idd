@@ -24,6 +24,9 @@ class Settings:
     bounds: list[list[float]]
     max_step: float
     min_step: float = 0.5
+    min_vector: float = 0.5
+    min_coverage: float = 0.5
+    max_center_shift: float = 40.0
     eta: float | None = None
     enter_m1: float = 0.02
     exit_m1: float = 0.03
@@ -42,12 +45,16 @@ class Settings:
     seed: int = 0
 
     def validate(self, calibration):
+        if calibration.get("version") != 2:
+            raise ValueError("Calibration version 2 required; regenerate with calibrate_alignment.py")
         bounds = np.asarray(self.bounds, float)
         numbers = [self.max_step, self.min_step, self.enter_m1, self.exit_m1,
                    self.geometry_improvement, self.m2_improvement, self.readback_tolerance,
-                   *self.bo_halfwidth, *self.gp_length_scale, self.gp_noise, self.ei_xi, self.min_ei]
+                   *self.bo_halfwidth, *self.gp_length_scale, self.gp_noise, self.ei_xi, self.min_ei,
+                   self.min_vector, self.min_coverage, self.max_center_shift]
         if (bounds.shape != (2, 2) or not np.isfinite(bounds).all()
             or np.any(bounds[:, 0] >= bounds[:, 1]) or not np.isfinite(numbers).all()
+            or self.min_vector < 0 or not 0 <= self.min_coverage <= 1 or self.max_center_shift <= 0
             or not 0 < self.min_step <= self.max_step
             or not 0 < self.enter_m1 < self.exit_m1
             or min(self.bo_halfwidth) <= 0 or len(self.bo_halfwidth) != 2
@@ -69,13 +76,11 @@ class Settings:
         trained = np.asarray(calibration["calibration_bounds"])
         if np.any(bounds[:, 0] < trained[:, 0]) or np.any(bounds[:, 1] > trained[:, 1]):
             raise ValueError("Search bounds must lie inside the calibration envelope")
-        if self.max_step > calibration["max_step"]:
+        if self.max_step > calibration["gain_max_step"]:
             raise ValueError("max_step exceeds the calibrated gain's displacement limit")
-        if calibration["version"] != 1:
-            raise ValueError("Unsupported calibration version")
         Config(**calibration["evaluator"]).validate()
-        inverse = np.asarray(calibration["motor_from_error"], float)
-        if inverse.shape != (2, 2) or not np.isfinite(inverse).all() or np.linalg.matrix_rank(inverse) < 2:
+        jacobian = np.asarray(calibration["jacobian"], float)
+        if jacobian.shape != (2, 2) or not np.isfinite(jacobian).all() or np.linalg.matrix_rank(jacobian) < 2:
             raise ValueError("Invalid calibrated motor response")
         if not np.isfinite(calibration["eta"]) or calibration["eta"] <= 0:
             raise ValueError("Invalid calibrated gain")
@@ -274,12 +279,12 @@ class Controller:
         if e is None or fit is None:
             return 1, self.s.max_step
         center = np.array([fit["center_x"], fit["center_y"]])
-        if (np.linalg.norm(e) < self.cal["min_vector"]
-            or min(m["inner_coverage"], m["outer_coverage"]) < self.cal["min_coverage"]
-            or np.linalg.norm(center - self.cal["reference_center"]) > self.cal["max_center_shift"]):
+        if (np.linalg.norm(e) < self.s.min_vector
+            or min(m["inner_coverage"], m["outer_coverage"]) < self.s.min_coverage
+            or np.linalg.norm(center - self.cal["reference_center"]) > self.s.max_center_shift):
             return 1, self.s.max_step
         eta = self.cal["eta"] if self.s.eta is None else self.s.eta
-        d = -eta * np.asarray(self.cal["motor_from_error"]) @ e
+        d = -eta * np.linalg.solve(np.asarray(self.cal["jacobian"]), e)
         return (1 if d[axis] >= 0 else -1), float(np.clip(abs(d[axis]), self.s.min_step, self.s.max_step))
 
     def run(self):

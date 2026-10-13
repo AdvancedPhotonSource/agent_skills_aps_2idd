@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "units": "um",
   "evaluator": {
     "inner_axes": [
@@ -25,6 +25,14 @@
     -0.21009726905058526,
     -0.38055562343432453
   ],
+  "reference_center": [
+    445.8063576217666,
+    242.86892943662056
+  ],
+  "image_shape": [
+    480,
+    720
+  ],
   "jacobian": [
     [
       -0.6708759710978064,
@@ -35,69 +43,7 @@
       0.75256110779302
     ]
   ],
-  "motor_from_error": [
-    [
-      -1.7094134113529702,
-      -0.611789364191719
-    ],
-    [
-      0.545057643398062,
-      1.5238687868313923
-    ]
-  ],
   "eta": 1.5,
-  "diagnostics": {
-    "condition_number": 2.1362169951909027,
-    "usable_samples": 26,
-    "held_out_positions": 26,
-    "held_out_toward_reference_fraction": 0.8846153846153846,
-    "uncorrected_position_mse": 242.30769230769232,
-    "gain_scores": [
-      {
-        "eta": 0.25,
-        "held_out_position_mse": 162.92448014999638
-      },
-      {
-        "eta": 0.5,
-        "held_out_position_mse": 150.4092880932775
-      },
-      {
-        "eta": 0.75,
-        "held_out_position_mse": 147.68814383713493
-      },
-      {
-        "eta": 1.0,
-        "held_out_position_mse": 147.3039348032748
-      },
-      {
-        "eta": 1.5,
-        "held_out_position_mse": 147.2968363118139
-      },
-      {
-        "eta": 2.0,
-        "held_out_position_mse": 149.11304029965416
-      }
-    ],
-    "gain_validation": "Held-out one-step position prediction; not a hardware convergence test."
-  },
-  "reference_position": [
-    0.0,
-    0.0
-  ],
-  "reference_center": [
-    445.8063576217666,
-    242.86892943662056
-  ],
-  "image_shape": [
-    480,
-    720
-  ],
-  "reference_m2": 477919.0,
-  "max_step": 5.0,
-  "coarse_threshold": 0.02,
-  "min_vector": 0.5,
-  "min_coverage": 0.5,
-  "max_center_shift": 40.0,
   "calibration_bounds": [
     [
       -15.0,
@@ -107,5 +53,6 @@
       -15.0,
       15.0
     ]
-  ]
+  ],
+  "gain_max_step": 5.0
 }

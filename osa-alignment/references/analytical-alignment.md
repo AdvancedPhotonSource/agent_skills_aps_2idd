@@ -91,6 +91,34 @@ uv run --project scripts --locked python scripts/calibrate_alignment.py calibrat
   --output calibration.json --observations calibration-observations.json
 ```
 
+Calibration writes three separate files (names follow `--output`):
+
+| File | Contents |
+| --- | --- |
+| `calibration.json` | Version 2 calibration: eta, Jacobian, reference centroid offset, fixed image-measurement settings, and compatibility metadata |
+| `calibration.alignment.json` | Suggested runtime units, bounds, step limits, and direction-confidence thresholds; pass this through `align_osa.py --config` |
+| `calibration.report.json` | Gain scores, fit diagnostics, reference position/M2, and calibration sampling/filter options; not read during alignment |
+
+Use `--alignment-config` and `--report` to choose other output paths. All output
+paths must differ. `--observations` optionally saves per-image evaluation results.
+Generated alignment settings are a starting point: adjust permitted travel,
+minimum useful step, BO settings, and budgets for the instrument or replay grid.
+
+The calibration stores only the forward `jacobian`; the controller solves
+`J delta = e` at runtime. Image evaluator settings and `centroid_percentile` stay
+with calibration so the feature definition remains consistent. `reference_center`
+and `image_shape` support compatibility checks. `calibration_bounds` records the
+sampled envelope; `gain_max_step` records the step limit used to select eta.
+The configured runtime `max_step` can be smaller than this limit. These metadata
+are separate from operational confidence thresholds and motor limits.
+
+Version 1 calibration files must be regenerated with the updated calibration
+script. The bundled [calibration](../scripts/calibration.json),
+[alignment settings](../scripts/calibration.alignment.json), and
+[report](../scripts/calibration.report.json) use the new format and preserve the
+previous fitted eta and Jacobian. Reuse them only under matching image and motor
+conditions.
+
 The reference is fitted first; its inner and outer semiaxes are then fixed for
 all subsequent fits. Each fit can translate and rotate. To specify semiaxes or
 change edge detection, background subtraction, or intensity normalization, pass
@@ -122,7 +150,7 @@ clipped to its current trial step and permitted travel.
 Each candidate eta is scored by leaving out every image at one motor position,
 refitting J on the remaining positions, and predicting the residual distance to
 the reference after one bounded correction. The smallest gain wins a tie.
-The artifact reports this position MSE, response condition number, and fraction
+The separate report records this position MSE, response condition number, and fraction
 of held-out directions pointing toward the reference. This estimates a useful
 initial gain; physical convergence and the axis-pass policy require separate
 validation. Poor or singular calibration is rejected when no candidate gain
@@ -170,6 +198,9 @@ motor units and limits that must be replaced with appropriate local values:
 | --- | --- | --- |
 | `units`, `bounds`, `max_step` | required | Adapter units, `[x_min,x_max]` and `[y_min,y_max]`, maximum Euclidean displacement for every move including recovery |
 | `min_step` | 0.5 | Smallest trial displacement in motor units |
+| `min_vector` | 0.5 | Minimum centroid error in pixels for using its direction |
+| `min_coverage` | 0.5 | Minimum support fraction on each candidate boundary for using the centroid direction |
+| `max_center_shift` | 40 | Maximum fitted-center displacement from the calibrated reference center, in pixels |
 | `eta` | calibration value | Positive gain override for coarse correction |
 | `enter_m1`, `exit_m1` | 0.02, 0.03 | Fine-stage entry and coarse-stage recovery thresholds; entry < exit |
 | `geometry_improvement` | 0.0001 | Minimum diagnostic geometry decrease for accepting a coarse trial |
@@ -187,14 +218,14 @@ motor units and limits that must be replaced with appropriate local values:
 | `seed` | 0 | Random seed for reproducible candidate generation |
 
 Bounds must stay inside the calibration envelope and `max_step` must not exceed
-the limit used in calibration. All settings and the calibration are recorded at
+`gain_max_step` recorded in calibration. All settings and the calibration are recorded at
 the beginning of the trajectory. Thresholds are prototype settings to qualify
 with repeated measurements at the local instrument; they are not universal.
 
 ### Coarse stage
 
 Start with an x-axis pass. Use the calibrated centroid direction when the feature
-passes the calibration's vector, coverage, and center-shift checks; otherwise
+passes the runtime configuration's vector, coverage, and center-shift checks; otherwise
 use bounded positive/negative probes. Continue on the active axis while geometry
 improves. After a failed trial, restore and reimage the incumbent, try the opposite
 direction, then halve the step. Switch axes only when both directions are exhausted
@@ -241,7 +272,7 @@ EI threshold. A difficult image landscape can still trap this local search.
 
 ```sh
 uv run --project scripts --locked python scripts/align_osa.py \
-  --calibration calibration.json --config alignment.json \
+  --calibration calibration.json --config calibration.alignment.json \
   --manifest recorded-images.json --start 10 -10 \
   --log replay-trajectory.jsonl --output replay-result.json
 ```

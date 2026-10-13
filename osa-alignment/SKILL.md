@@ -128,7 +128,9 @@ are unusable, not that the physical intensity is infinite. A finite diagnostic
 [scripts/calibrate_alignment.py](scripts/calibrate_alignment.py) uses recorded
 images at known motor positions around a good reference to estimate the reference
 centroid offset, motor response, and step gain eta. It saves these with the fixed
-ellipse semiaxes in a calibration JSON file. Reuse an existing calibration when
+ellipse semiaxes and compatibility metadata in a compact calibration JSON file.
+Runtime settings and diagnostics are saved separately as `calibration.alignment.json`
+and `calibration.report.json` by default. Reuse an existing calibration when
 its optics, camera orientation, units, and intensity conditions still apply.
 
 ```sh
@@ -144,11 +146,14 @@ manifest's motor units. See [calibration inputs and options](references/analytic
 [scripts/align_osa.py](scripts/align_osa.py) performs calibrated coarse axis passes,
 then constrained local Bayesian optimization of M2 once M1 meets its threshold.
 The calibration file is required. Eta defaults to its calibrated value and can
-be overridden in the alignment configuration.
+be overridden in the alignment configuration. The bundled
+[calibration](scripts/calibration.json) and [runtime settings](scripts/calibration.alignment.json)
+are available for matching image and motor conditions; diagnostics are in the
+[separate report](scripts/calibration.report.json).
 
 ```sh
 uv run --project scripts --locked python scripts/align_osa.py \
-  --calibration calibration.json --config alignment.json \
+  --calibration calibration.json --config calibration.alignment.json \
   --adapter beamline_adapter:create_adapter --adapter-config beamline.json \
   --log trajectory.jsonl --output result.json
 ```
