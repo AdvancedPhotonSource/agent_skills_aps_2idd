@@ -14,6 +14,16 @@
   "min_step": 0.5,
   "min_vector": 0.5,
   "min_coverage": 0.3,
+  "evaluator": {
+    "inner_axes": [
+      37.841116892118016,
+      33.66231727280725
+    ],
+    "outer_axes": [
+      102.1991801297988,
+      91.9040576715142
+    ]
+  },
   "eta": 0.75,
   "max_acquisitions": 30,
   "bo_stage_entrance_m1": 0.012
