@@ -119,6 +119,16 @@ script. The bundled [calibration](../scripts/calibration.json),
 previous fitted eta and Jacobian. Reuse them only under matching image and motor
 conditions.
 
+The bundled runtime file overrides eta to `0.75`, sets `enter_m1 = 0.012` and
+`exit_m1 = 0.02`, and limits total acquisitions to 30. The tighter entry gate
+keeps the controller following the centroid correction longer before local BO.
+These settings were verified on interpolated recorded images starting at
+(-15, -15) um with seed 0, reaching within ±2 um on both axes in 29 acquisitions
+including final confirmations. This is a simulator result under the recorded
+conditions, not a guarantee for arbitrary starting positions or live data.
+The parameter table below lists script defaults; explicit runtime settings
+override them. New calibration runs emit initial settings for local tuning.
+
 The reference is fitted first; its inner and outer semiaxes are then fixed for
 all subsequent fits. Each fit can translate and rotate. To specify semiaxes or
 change edge detection, background subtraction, or intensity normalization, pass
@@ -144,15 +154,15 @@ Image x points right and image y points down.
 Calibration fits `e = J (p - p_reference)` by least squares. `J` contains axis
 signs, scale, rotation, and coupling in pixels per motor unit. The proposed motor
 correction is `-eta * inverse(J) @ e`. A scalar eta alone cannot establish camera
-to motor signs. Coarse alignment executes the component along its active axis,
-clipped to its current trial step and permitted travel.
+to motor signs. Coarse alignment moves both motors along this full vector.
+Step limits and travel bounds shorten the vector while preserving its direction.
 
 Each candidate eta is scored by leaving out every image at one motor position,
 refitting J on the remaining positions, and predicting the residual distance to
 the reference after one bounded correction. The smallest gain wins a tie.
 The separate report records this position MSE, response condition number, and fraction
 of held-out directions pointing toward the reference. This estimates a useful
-initial gain; physical convergence and the axis-pass policy require separate
+initial gain; physical convergence and the search policy require separate
 validation. Poor or singular calibration is rejected when no candidate gain
 improves held-out distance or a response fit exceeds the condition limit.
 
@@ -224,13 +234,22 @@ with repeated measurements at the local instrument; they are not universal.
 
 ### Coarse stage
 
-Start with an x-axis pass. Use the calibrated centroid direction when the feature
-passes the runtime configuration's vector, coverage, and center-shift checks; otherwise
-use bounded positive/negative probes. Continue on the active axis while geometry
-improves. After a failed trial, restore and reimage the incumbent, try the opposite
-direction, then halve the step. Switch axes only when both directions are exhausted
-at the minimum useful step. Repeat passes as needed. The gain supplies an initial
-step estimate; measured geometry improvement controls acceptance and step refinement.
+Use the full correction `-eta * solve(J, e)` when the feature passes the runtime
+configuration's vector, coverage, and center-shift checks. Scale its Euclidean
+length into `[min_step, max_step]`, preserving the component ratio. Shorten it
+further at travel bounds along the same direction; skip a move if the available
+travel is shorter than `min_step`. Recompute the correction after each accepted
+image. A rejected trial is followed by a return to the incumbent and a fresh
+image, then an opposite-direction probe. If both directions fail, halve the
+step ceiling and retry. Stop when refinement would fall below `min_step`.
+
+When the centroid is unavailable or fails the confidence checks, probe the four
+diagonal directions `(+x,+y)`, `(-x,-y)`, `(+x,-y)`, `(-x,+y)` at the current
+step ceiling, within travel bounds. Halve the ceiling if all four fail. An
+accepted trial resets the ceiling to `max_step`; geometry improvement controls
+acceptance. Exact-grid replay chooses the nearest available measurement to a
+proposed endpoint within its step radius and forward half-plane, so replay can
+quantize the direction. Continuous adapters preserve the proposed direction.
 
 If fitting fails, use finite `geometry_score` diagnostics when available. A fully
 unmeasurable image supplies no numerical geometry improvement; bounded probes may

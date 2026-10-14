@@ -1,0 +1,57 @@
+{
+  "diagnostics": {
+    "condition_number": 2.1362169951909027,
+    "usable_samples": 26,
+    "held_out_positions": 26,
+    "held_out_toward_reference_fraction": 0.8846153846153846,
+    "uncorrected_position_mse": 242.30769230769232,
+    "gain_scores": [
+      {
+        "eta": 0.25,
+        "held_out_position_mse": 162.92448014999638
+      },
+      {
+        "eta": 0.5,
+        "held_out_position_mse": 150.4092880932775
+      },
+      {
+        "eta": 0.75,
+        "held_out_position_mse": 147.68814383713493
+      },
+      {
+        "eta": 1.0,
+        "held_out_position_mse": 147.3039348032748
+      },
+      {
+        "eta": 1.5,
+        "held_out_position_mse": 147.2968363118139
+      },
+      {
+        "eta": 2.0,
+        "held_out_position_mse": 149.11304029965416
+      }
+    ],
+    "gain_validation": "Held-out one-step position prediction; not a hardware convergence test."
+  },
+  "reference_position": [
+    0.0,
+    0.0
+  ],
+  "reference_m2": 477919.0,
+  "calibration_options": {
+    "eta_grid": [
+      0.25,
+      0.5,
+      0.75,
+      1.0,
+      1.5,
+      2.0
+    ],
+    "max_step": 5.0,
+    "coarse_threshold": 0.02,
+    "min_vector": 0.5,
+    "min_coverage": 0.5,
+    "max_center_shift": 40.0,
+    "max_condition": 100.0
+  }
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Align an OSA with calibrated axis passes and constrained local Bayesian search."""
+"""Align an OSA with calibrated vector corrections and constrained local Bayesian search."""
 from __future__ import annotations
 
 import argparse
@@ -236,7 +236,7 @@ class Controller:
             trend = (f"Previous M1={float(old['primary_metric']):.5g}, "
                      f"M2={float(old['secondary_metric']):.6g}; "
                      f"geometry {'improved' if geometry(obs) < geometry(self.current) else 'unchanged or worse'}.")
-        next_plan = "Compare against the incumbent, then continue this axis, restore, confirm, or select a local BO trial."
+        next_plan = "Compare against the incumbent, then follow the centroid correction, restore, confirm, or select a local BO trial."
         self.record("observation", text=f"{description} {trend} Next: {next_plan}",
                     observation=obs, description=description, trend=trend, next_plan=next_plan,
                     remaining=self.s.max_acquisitions - self.acquisitions)
@@ -244,15 +244,11 @@ class Controller:
         self.current = obs
         return obs
 
-    def candidates(self, incumbent, *, axis=None, sign=1, step=None):
+    def candidates(self, incumbent):
         p = np.array(incumbent["position"])
         bounds = np.asarray(self.s.bounds)
         if hasattr(self.backend, "candidate_positions"):
             pool = np.asarray(self.backend.candidate_positions, float)
-        elif axis is not None:
-            trial = p.copy()
-            trial[axis] += sign * step
-            pool = np.clip(trial, bounds[:, 0], bounds[:, 1])[None, :]
         else:
             lo = np.maximum(bounds[:, 0], p - self.s.bo_halfwidth)
             hi = np.minimum(bounds[:, 1], p + self.s.bo_halfwidth)
@@ -261,38 +257,64 @@ class Controller:
         allowed = (np.all((pool >= bounds[:, 0]) & (pool <= bounds[:, 1]), axis=1)
                    & (np.linalg.norm(delta, axis=1) <= self.s.max_step + 1e-9)
                    & (np.linalg.norm(delta, axis=1) >= self.s.min_step - 1e-9))
-        if axis is not None:
-            allowed &= (np.abs(delta[:, 1 - axis]) < 1e-9) & (delta[:, axis] * sign > 0)
-            allowed &= np.abs(delta[:, axis]) <= step + 1e-9
-        else:
-            allowed &= np.all(np.abs(delta) <= np.asarray(self.s.bo_halfwidth) + 1e-9, axis=1)
+        allowed &= np.all(np.abs(delta) <= np.asarray(self.s.bo_halfwidth) + 1e-9, axis=1)
         pool = pool[allowed]
-        if axis is None and len(pool):
+        if len(pool):
             seen = np.array([o["position"] for o in self.history])
             pool = pool[np.min(np.linalg.norm(pool[:, None] - seen[None, :], axis=2), axis=1)
                         >= self.s.min_step * 0.5]
         return pool
 
-    def direction(self, observation, axis):
+    def direction(self, observation):
         e, m = observation["error"], observation["metrics"]
         fit = m.get("fit")
         if e is None or fit is None:
-            return 1, self.s.max_step
+            return None
         center = np.array([fit["center_x"], fit["center_y"]])
-        if (np.linalg.norm(e) < self.s.min_vector
+        if (not np.isfinite(e).all() or np.linalg.norm(e) <= 0
+            or np.linalg.norm(e) < self.s.min_vector
             or min(m["inner_coverage"], m["outer_coverage"]) < self.s.min_coverage
             or np.linalg.norm(center - self.cal["reference_center"]) > self.s.max_center_shift):
-            return 1, self.s.max_step
+            return None
         eta = self.cal["eta"] if self.s.eta is None else self.s.eta
         d = -eta * np.linalg.solve(np.asarray(self.cal["jacobian"]), e)
-        return (1 if d[axis] >= 0 else -1), float(np.clip(abs(d[axis]), self.s.min_step, self.s.max_step))
+        length = np.linalg.norm(d)
+        return d * (np.clip(length, self.s.min_step, self.s.max_step) / length)
+
+    def coarse_trial(self, incumbent, displacement):
+        """Shorten the vector at travel bounds without rotating it."""
+        p = np.asarray(incumbent["position"], float)
+        bounds = np.asarray(self.s.bounds)
+        scale = 1.
+        for i, value in enumerate(displacement):
+            if value > 0:
+                scale = min(scale, (bounds[i, 1] - p[i]) / value)
+            elif value < 0:
+                scale = min(scale, (bounds[i, 0] - p[i]) / value)
+        delta = displacement * scale
+        target = p + delta
+        length = np.linalg.norm(delta)
+        if length < self.s.min_step - 1e-9:
+            return None
+        if hasattr(self.backend, "candidate_positions"):
+            # Replay quantizes the vector to available measurements in its forward half-plane.
+            pool = np.asarray(self.backend.candidate_positions, float)
+            offsets = pool - p
+            distances = np.linalg.norm(offsets, axis=1)
+            allowed = (np.all((pool >= bounds[:, 0]) & (pool <= bounds[:, 1]), axis=1)
+                       & (distances >= self.s.min_step - 1e-9)
+                       & (distances <= length + 1e-9) & (offsets @ delta > 0))
+            pool = pool[allowed]
+            if not len(pool):
+                return None
+            target = pool[np.argmin(np.linalg.norm(pool - target, axis=1))]
+        return target
 
     def run(self):
         incumbent, reason, status = None, "budget exhausted", "best_found"
         try:
             incumbent = self.acquire(self.position(), "Acquire baseline before choosing a move.", "baseline")
-            axis, failed_axes, stage = 0, 0, "coarse"
-            sign, step = self.direction(incumbent, axis)
+            stage = "coarse"
             failures, ceiling, confirmed = 0, self.s.max_step, 1
             while self.acquisitions < self.s.max_acquisitions - self.s.confirmations - 1:
                 good = feasible(incumbent, self.s)
@@ -310,8 +332,7 @@ class Controller:
                 if stage == "bo" and (not incumbent["metrics"]["valid"]
                                       or geometry(incumbent) > self.s.exit_m1):
                     stage, confirmed = "coarse", 0
-                    sign, step = self.direction(incumbent, axis)
-                    failures, ceiling, failed_axes = 0, self.s.max_step, 0
+                    failures, ceiling = 0, self.s.max_step
                 if stage == "bo":
                     pool = self.candidates(incumbent)
                     if not len(pool):
@@ -327,9 +348,21 @@ class Controller:
                     trial = pool[np.argmax(scores)]
                     plan = f"Local BO trial at {trial.tolist()}; constrained EI={scores.max():.5g}."
                 else:
-                    pool = self.candidates(incumbent, axis=axis, sign=sign, step=step)
-                    trial = pool[np.argmax(np.abs(pool[:, axis] - incumbent["position"][axis]))] if len(pool) else None
-                    plan = f"Continue {'xy'[axis]} axis pass, sign={sign}, step <= {step:g}; seek lower geometry error."
+                    correction = self.direction(incumbent)
+                    if correction is None:
+                        probes = np.array([[1., 1.], [-1., -1.], [1., -1.], [-1., 1.]]) / np.sqrt(2)
+                        attempts, step = len(probes), ceiling
+                        displacement = probes[failures % attempts] * step
+                        source = "Centroid confidence insufficient; bounded 2D probe"
+                    else:
+                        attempts = 2
+                        step = min(np.linalg.norm(correction), ceiling)
+                        displacement = correction * (step / np.linalg.norm(correction))
+                        if failures % attempts:
+                            displacement = -displacement
+                        source = "Calibrated centroid correction" if failures % attempts == 0 else "Reverse correction probe"
+                    trial = self.coarse_trial(incumbent, displacement)
+                    plan = f"{source}, displacement={displacement.tolist()}; seek lower geometry error."
                 accepted = False
                 if trial is not None:
                     obs = self.acquire(trial, plan, stage)
@@ -339,31 +372,18 @@ class Controller:
                                 (feasible(obs, self.s) or geometry(obs) < geometry(incumbent) - self.s.geometry_improvement))
                     if accepted:
                         incumbent, confirmed = obs, 1
-                        failed_axes, failures = 0, 0
-                        if stage == "coarse":
-                            sign, proposed = self.direction(incumbent, axis)
-                            step = min(proposed, ceiling)
+                        failures, ceiling = 0, self.s.max_step
                         continue
                     incumbent = self.acquire(incumbent["position"], "Trial did not improve the objective; restore and verify incumbent.", "restore")
                     confirmed = 1
                 if stage == "coarse":
                     failures += 1
-                    if failures == 1:
-                        sign *= -1
-                    else:
+                    if failures >= attempts:
                         failures = 0
                         ceiling = step / 2
-                        if ceiling >= self.s.min_step:
-                            sign, proposed = self.direction(incumbent, axis)
-                            step = min(proposed, ceiling)
-                        else:
-                            failed_axes += 1
-                            if failed_axes >= 2:
-                                reason = "both axis passes exhausted at minimum step"
-                                break
-                            axis = 1 - axis
-                            ceiling = self.s.max_step
-                            sign, step = self.direction(incumbent, axis)
+                        if ceiling < self.s.min_step:
+                            reason = "coarse vector search exhausted at minimum step"
+                            break
             # Final repeated acquisitions count toward the same budget.
             confirmations = []
             for _ in range(self.s.confirmations):

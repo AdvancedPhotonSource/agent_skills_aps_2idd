@@ -82,16 +82,16 @@ def test_centroid_uses_outer_ellipse_and_background():
     assert np.allclose(offset, [1, 0])
 
 
-def test_axis_passes_then_bo_and_confirmed_target(tmp_path):
+def test_vector_corrections_then_bo_and_confirmed_target(tmp_path):
     backend = SyntheticBackend([12, 8])
-    controller = Controller(calibration(), settings(), backend, tmp_path / "log.jsonl",
+    controller = Controller(calibration(), settings(eta=.5), backend, tmp_path / "log.jsonl",
                             lambda p, c: observation(p))
     result = controller.run()
     assert result["status"] == "metric_target_reached"
     assert result["final_readback"] == [0, 0]
     coarse = [o for o in controller.history if o["stage"] == "coarse"]
-    assert coarse[0]["position"][1] == coarse[1]["position"][1] == 8
-    assert coarse[0]["position"][0] > coarse[1]["position"][0]
+    assert np.all(np.array(coarse[0]["position"]) < [12, 8])
+    assert np.all(np.array(coarse[1]["position"]) < coarse[0]["position"])
     assert any(o["stage"] == "bo" for o in controller.history)
     assert backend.acquisitions == result["acquisitions"] <= 40
     for before, after in backend.moves:
@@ -215,10 +215,58 @@ def test_direction_solves_jacobian_and_uses_runtime_thresholds(tmp_path):
     obs = observation([4, 2])
     obs['error'] = (j @ [4, 2]).tolist()
     c = Controller(cal, settings(eta=.5), SyntheticBackend([4, 2]), tmp_path / 'normal')
-    assert c.direction(obs, 0) == (-1, 2.)
-    assert c.direction(obs, 1) == (-1, 1.)
+    np.testing.assert_allclose(c.direction(obs), [-2., -1.])
     c = Controller(cal, settings(min_vector=100), SyntheticBackend([4, 2]), tmp_path / 'fallback')
-    assert c.direction(obs, 0) == (1, 5.)
+    assert c.direction(obs) is None
+
+
+@pytest.mark.parametrize('eta,length', [(10., 5.), (.01, 1.)])
+def test_vector_step_limits_preserve_direction(tmp_path, eta, length):
+    c = Controller(calibration(), settings(eta=eta), SyntheticBackend([3, 4]), tmp_path / 'log')
+    correction = c.direction(observation([3, 4]))
+    np.testing.assert_allclose(correction, np.array([-3., -4.]) * length / 5)
+
+
+def test_continuous_coarse_step_preserves_vector_at_bounds(tmp_path):
+    backend = SyntheticBackend([14, 10])
+    del backend.candidate_positions
+    c = Controller(calibration(), settings(), backend, tmp_path / 'log')
+    # Shorten both components by the same factor at the x bound.
+    np.testing.assert_allclose(c.coarse_trial(observation([14, 10]), np.array([3., 4.])),
+                               [15., 10. + 4. / 3.])
+    assert c.coarse_trial(observation([15, 10]), np.array([3., 4.])) is None
+
+
+def test_untrusted_centroid_uses_2d_probe(tmp_path):
+    backend = SyntheticBackend([-10, -10])
+    del backend.candidate_positions
+    def measured(p, cal):
+        obs = observation(p)
+        obs['error'] = None
+        return obs
+    c = Controller(calibration(), settings(max_acquisitions=7), backend, tmp_path / 'log', measured)
+    c.run()
+    first = c.history[1]
+    assert first['stage'] == 'coarse'
+    np.testing.assert_allclose(np.array(first['position']) + 10, [5 / np.sqrt(2)] * 2)
+
+
+def test_rejected_vector_is_restored_reversed_and_shortened(tmp_path):
+    backend = SyntheticBackend([0, 0])
+    del backend.candidate_positions
+    def measured(p, cal):
+        obs = observation(p)
+        obs['error'] = [3., 4.]
+        distance = np.linalg.norm(p)
+        score = .2 if distance == 0 else (.1 if distance < 2 else .3)
+        obs['metrics']['geometry_score'] = obs['metrics']['primary_metric'] = score
+        return obs
+    c = Controller(calibration(), settings(max_acquisitions=13), backend, tmp_path / 'log', measured)
+    c.run()
+    coarse = [o for o in c.history if o['stage'] == 'coarse']
+    np.testing.assert_allclose([o['position'] for o in coarse[:5]],
+                               [[-3, -4], [3, 4], [-1.5, -2], [1.5, 2], [-.75, -1]])
+    assert all(o['position'] == [0., 0.] for o in c.history[:9] if o['stage'] == 'restore')
 
 
 @pytest.mark.parametrize('field,value', [('min_vector', -1), ('min_coverage', 1.1),
@@ -273,7 +321,7 @@ def test_calibration_cli_outputs_independently_usable_files(tmp_path, monkeypatc
     assert runtime['max_center_shift'] == 12 and runtime['max_step'] == 4
     controller = Controller(cal, Settings(**runtime), SyntheticBackend([4, 0]),
                             tmp_path / 'trajectory', lambda p, c: observation(p))
-    assert controller.direction(dict(observation([4, 0]), error=(j @ [4, 0]).tolist()), 0)[0] == -1
+    assert controller.direction(dict(observation([4, 0]), error=(j @ [4, 0]).tolist()))[0] < 0
 
 
 def test_bundled_calibration_and_config_are_compatible():

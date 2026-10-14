@@ -116,7 +116,7 @@ acquisition settings make comparisons meaningful. A low sum can still conceal
 a localized bright spot.
 
 **Interpret M1 first, then M2.** The controller requires a valid fit and
-`M1 <= enter_m1` (default 0.02) before optimizing M2 within that constraint.
+`M1 <= enter_m1` (script default 0.02; bundled settings 0.012) before optimizing M2 within that constraint.
 A lower M2 cannot compensate for an incomplete or badly fitted donut. Qualify
 thresholds and meaningful differences using a good reference and repeat images.
 Invalid fits return both metrics as `"inf"` in JSON; this means the measurements
@@ -143,13 +143,17 @@ manifest's motor units. See [calibration inputs and options](references/analytic
 
 ### Run alignment
 
-[scripts/align_osa.py](scripts/align_osa.py) performs calibrated coarse axis passes,
+[scripts/align_osa.py](scripts/align_osa.py) performs calibrated 2D centroid corrections,
 then constrained local Bayesian optimization of M2 once M1 meets its threshold.
 The calibration file is required. Eta defaults to its calibrated value and can
 be overridden in the alignment configuration. The bundled
 [calibration](scripts/calibration.json) and [runtime settings](scripts/calibration.alignment.json)
 are available for matching image and motor conditions; diagnostics are in the
 [separate report](scripts/calibration.report.json).
+The bundled runtime settings use `eta = 0.75`, BO entry at `M1 <= 0.012`,
+coarse recovery above `0.02`, and a 30-acquisition budget including restores
+and confirmations. These settings were tuned on interpolated recorded images;
+qualify them under the instrument's acquisition conditions.
 
 ```sh
 uv run --project scripts --locked python scripts/align_osa.py \
