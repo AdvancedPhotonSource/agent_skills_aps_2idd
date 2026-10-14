@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from functools import partial
 from datetime import datetime, timezone
 import importlib
 import json
@@ -26,7 +27,8 @@ class Settings:
     min_step: float = 0.5
     min_vector: float = 0.5
     min_coverage: float = 0.5
-    max_center_shift: float = 40.0
+    evaluator: dict = field(default_factory=dict)
+    centroid_percentile: float = 10.0
     eta: float | None = None
     enter_m1: float = 0.02
     exit_m1: float = 0.03
@@ -45,16 +47,15 @@ class Settings:
     seed: int = 0
 
     def validate(self, calibration):
-        if calibration.get("version") != 2:
-            raise ValueError("Calibration version 2 required; regenerate with calibrate_alignment.py")
         bounds = np.asarray(self.bounds, float)
         numbers = [self.max_step, self.min_step, self.enter_m1, self.exit_m1,
                    self.geometry_improvement, self.m2_improvement, self.readback_tolerance,
                    *self.bo_halfwidth, *self.gp_length_scale, self.gp_noise, self.ei_xi, self.min_ei,
-                   self.min_vector, self.min_coverage, self.max_center_shift]
+                   self.min_vector, self.min_coverage, self.centroid_percentile]
         if (bounds.shape != (2, 2) or not np.isfinite(bounds).all()
             or np.any(bounds[:, 0] >= bounds[:, 1]) or not np.isfinite(numbers).all()
-            or self.min_vector < 0 or not 0 <= self.min_coverage <= 1 or self.max_center_shift <= 0
+            or self.min_vector < 0 or not 0 <= self.min_coverage <= 1
+            or not 0 <= self.centroid_percentile < 100
             or not 0 < self.min_step <= self.max_step
             or not 0 < self.enter_m1 < self.exit_m1
             or min(self.bo_halfwidth) <= 0 or len(self.bo_halfwidth) != 2
@@ -71,14 +72,10 @@ class Settings:
             raise ValueError("eta must be positive and finite")
         if self.target_m2 is not None and not np.isfinite(self.target_m2):
             raise ValueError("target_m2 must be finite")
-        if self.units != calibration["units"]:
-            raise ValueError("Motor units must match calibration")
-        trained = np.asarray(calibration["calibration_bounds"])
-        if np.any(bounds[:, 0] < trained[:, 0]) or np.any(bounds[:, 1] > trained[:, 1]):
-            raise ValueError("Search bounds must lie inside the calibration envelope")
-        if self.max_step > calibration["gain_max_step"]:
-            raise ValueError("max_step exceeds the calibrated gain's displacement limit")
-        Config(**calibration["evaluator"]).validate()
+        Config(**self.evaluator).validate()
+        reference_error = np.asarray(calibration["reference_error"], float)
+        if reference_error.shape != (2,) or not np.isfinite(reference_error).all():
+            raise ValueError("reference_error must contain two finite pixel offsets")
         jacobian = np.asarray(calibration["jacobian"], float)
         if jacobian.shape != (2, 2) or not np.isfinite(jacobian).all() or np.linalg.matrix_rank(jacobian) < 2:
             raise ValueError("Invalid calibrated motor response")
@@ -160,12 +157,14 @@ def constrained_ei(observations, candidates, settings):
 
 
 class Controller:
-    def __init__(self, calibration, settings, backend, log_path, measurement=measure):
+    def __init__(self, calibration, settings, backend, log_path, measurement=None):
         settings.validate(calibration)
         if backend.units != settings.units:
             raise ValueError("Adapter units must match settings")
         self.cal, self.s, self.backend = calibration, settings, backend
-        self.measurement, self.log_path = measurement, Path(log_path)
+        self.measurement = measurement if measurement is not None else partial(
+            measure, config=Config(**settings.evaluator), centroid_percentile=settings.centroid_percentile)
+        self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         # Exclusive creation keeps a previous trajectory from being overwritten.
         with self.log_path.open("x"):
@@ -212,8 +211,6 @@ class Controller:
         if np.linalg.norm(after - actual) > self.s.readback_tolerance:
             raise RuntimeError("Motor position changed during acquisition")
         obs = self.measurement(image, self.cal)
-        if obs["metrics"]["image_shape"] != self.cal["image_shape"]:
-            raise RuntimeError("Image dimensions differ from calibration")
         obs.update(position=after.tolist(), target=target.tolist(), stage=stage,
                    acquisition=self.acquisitions)
         m = obs["metrics"]
@@ -270,11 +267,9 @@ class Controller:
         fit = m.get("fit")
         if e is None or fit is None:
             return None
-        center = np.array([fit["center_x"], fit["center_y"]])
         if (not np.isfinite(e).all() or np.linalg.norm(e) <= 0
             or np.linalg.norm(e) < self.s.min_vector
-            or min(m["inner_coverage"], m["outer_coverage"]) < self.s.min_coverage
-            or np.linalg.norm(center - self.cal["reference_center"]) > self.s.max_center_shift):
+            or min(m["inner_coverage"], m["outer_coverage"]) < self.s.min_coverage):
             return None
         eta = self.cal["eta"] if self.s.eta is None else self.s.eta
         d = -eta * np.linalg.solve(np.asarray(self.cal["jacobian"]), e)

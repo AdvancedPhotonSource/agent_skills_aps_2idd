@@ -1,23 +1,20 @@
 """Synthetic calibration and control tests; no instrument or recorded data needed."""
-from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
 
 import numpy as np
 import pytest
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from calibrate_alignment import centroid_offset, fit_response
+from calibrate_alignment import centroid_offset, fit_response, measure
 from align_osa import Controller, Replay, Settings, constrained_ei
 from evaluate_alignment import Config
 
 
 def calibration():
-    return dict(version=2, units="um", evaluator=asdict(Config(inner_axes=(3, 3), outer_axes=(8, 8))),
-                calibration_bounds=[[-15, 15], [-15, 15]], gain_max_step=5., eta=1.,
-                jacobian=[[1., 0.], [0., 1.]], reference_center=[20., 20.], reference_error=[0., 0.],
-                image_shape=[40, 40], centroid_percentile=10.)
+    return dict(eta=1., jacobian=[[1., 0.], [0., 1.]], reference_error=[0., 0.])
 
 
 def observation(position, *, invalid=False):
@@ -145,8 +142,8 @@ def test_replay_is_exact_discrete_and_cycles_repeats():
         backend.move_absolute([.1, 0])
 
 
-@pytest.mark.parametrize("options", [dict(max_step=6), dict(units="mm"), dict(enter_m1=.04),
-                                   dict(bounds=[[-16, 15], [-15, 15]]), dict(eta=0),
+@pytest.mark.parametrize("options", [dict(max_step=0), dict(enter_m1=.04),
+                                   dict(bounds=[[15, -15], [-15, 15]]), dict(eta=0),
                                    dict(max_acquisitions=3)])
 def test_unsafe_settings_rejected(options):
     with pytest.raises(ValueError):
@@ -270,17 +267,60 @@ def test_rejected_vector_is_restored_reversed_and_shortened(tmp_path):
 
 
 @pytest.mark.parametrize('field,value', [('min_vector', -1), ('min_coverage', 1.1),
-                                         ('max_center_shift', 0), ('min_vector', float('nan'))])
+                                         ('centroid_percentile', 100), ('min_vector', float('nan'))])
 def test_runtime_confidence_settings_validated(field, value):
     with pytest.raises(ValueError):
         settings(**{field: value}).validate(calibration())
 
 
-def test_old_calibration_has_actionable_error():
-    cal = calibration()
-    cal['version'] = 1
-    with pytest.raises(ValueError, match='regenerate with calibrate_alignment.py'):
+@pytest.mark.parametrize('error', [[0], [0, 0, 0], [float('nan'), 0]])
+def test_invalid_reference_error_rejected(error):
+    cal = dict(calibration(), reference_error=error)
+    with pytest.raises(ValueError, match='reference_error'):
         settings().validate(cal)
+
+
+def test_runtime_limits_are_independent_of_calibration():
+    settings(bounds=[[-100, 100], [-100, 100]], max_step=20).validate(calibration())
+
+
+def test_direction_independent_of_absolute_fitted_center(tmp_path):
+    c = Controller(calibration(), settings(), SyntheticBackend([4, 2]), tmp_path / 'log')
+    obs = observation([4, 2])
+    expected = c.direction(obs)
+    obs['metrics']['fit'].update(center_x=2500., center_y=1800.)
+    obs['metrics']['image_shape'] = [3000, 4000]
+    np.testing.assert_array_equal(c.direction(obs), expected)
+
+
+@pytest.mark.parametrize('fixed_axes', [False, True])
+def test_measurement_and_controller_accept_translated_resized_images(tmp_path, fixed_axes):
+    y, x = np.indices((200, 220))
+    dx, dy = x - 110., y - 100.
+    ring = ((dx / 65.) ** 2 + (dy / 55.) ** 2 <= 1) & ((dx / 28.) ** 2 + (dy / 24.) ** 2 >= 1)
+    original = np.where(ring, 100. + .2 * dx, 0.).astype(np.float32)
+    shifted = np.pad(original, ((40, 80), (70, 50)))
+    paths = [tmp_path / 'original.tiff', tmp_path / 'shifted.tiff']
+    for path, image in zip(paths, [original, shifted]):
+        Image.fromarray(image).save(path)
+    evaluator = dict(inner_axes=(28, 24), outer_axes=(65, 55)) if fixed_axes else {}
+    cal = dict(calibration(), reference_error=[.2, -.1])
+    before, after = [measure(path, cal, config=Config(**evaluator)) for path in paths]
+    assert before['metrics']['valid'] and after['metrics']['valid']
+    np.testing.assert_allclose(before['error'], after['error'], atol=.05)
+    assert before['metrics']['image_shape'] != after['metrics']['image_shape']
+
+    class Images(SyntheticBackend):
+        def acquire_image(self):
+            super().acquire_image()
+            return paths[(self.acquisitions - 1) % 2]
+
+    backend = Images([0, 0])
+    c = Controller(cal, settings(evaluator=evaluator, enter_m1=.05, exit_m1=.06,
+                                target_m2=1e9), backend, tmp_path / 'trajectory')
+    result = c.run()
+    assert result['status'] == 'metric_target_reached'
+    assert len({tuple(o['metrics']['image_shape']) for o in c.history}) == 2
 
 
 def test_calibration_cli_outputs_independently_usable_files(tmp_path, monkeypatch):
@@ -289,7 +329,7 @@ def test_calibration_cli_outputs_independently_usable_files(tmp_path, monkeypatc
     paths = {str(tmp_path / f'{i}.tiff'): p for i, p in enumerate(positions)}
     j = np.array([[-2., .3], [.7, 1.5]])
     offset = np.array([.2, -.3])
-    def measured(path, cal):
+    def measured(path, cal, **kwargs):
         obs = observation(paths[str(path)])
         obs['image'] = str(path)
         obs['error'] = (j @ paths[str(path)] + offset).tolist()
@@ -305,20 +345,17 @@ def test_calibration_cli_outputs_independently_usable_files(tmp_path, monkeypatc
     output = tmp_path / 'calibration.json'
     monkeypatch.setattr(sys, 'argv', ['calibrate_alignment.py', str(manifest),
         '--reference-position', '0', '0', '--max-step', '4', '--output', str(output),
-        '--eta-grid', '.25', '.5', '1', '--min-vector', '2', '--min-coverage', '.7',
-        '--max-center-shift', '12'])
+        '--eta-grid', '.25', '.5', '1', '--min-vector', '2', '--min-coverage', '.7'])
     module.main()
     cal = json.loads(output.read_text())
     runtime = json.loads((tmp_path / 'calibration.alignment.json').read_text())
     report = json.loads((tmp_path / 'calibration.report.json').read_text())
     assert np.allclose(cal['jacobian'], j)
     assert np.allclose(cal['reference_error'], offset)
-    assert 'diagnostics' not in cal and 'motor_from_error' not in cal
-    assert all(key not in cal for key in ['min_vector', 'min_coverage', 'max_center_shift',
-                                         'max_step', 'reference_m2', 'reference_position'])
+    assert set(cal) == {'eta', 'jacobian', 'reference_error'}
     assert report['diagnostics']['held_out_positions'] == 8
     assert runtime['min_vector'] == 2 and runtime['min_coverage'] == .7
-    assert runtime['max_center_shift'] == 12 and runtime['max_step'] == 4
+    assert runtime['max_step'] == 4 and 'evaluator' not in runtime
     controller = Controller(cal, Settings(**runtime), SyntheticBackend([4, 0]),
                             tmp_path / 'trajectory', lambda p, c: observation(p))
     assert controller.direction(dict(observation([4, 0]), error=(j @ [4, 0]).tolist()))[0] < 0

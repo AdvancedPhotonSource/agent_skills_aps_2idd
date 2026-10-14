@@ -95,42 +95,45 @@ Calibration writes three separate files (names follow `--output`):
 
 | File | Contents |
 | --- | --- |
-| `calibration.json` | Version 2 calibration: eta, Jacobian, reference centroid offset, fixed image-measurement settings, and compatibility metadata |
+| `calibration.json` | Only `eta`, `jacobian`, and `reference_error` |
 | `calibration.alignment.json` | Suggested runtime units, bounds, step limits, and direction-confidence thresholds; pass this through `align_osa.py --config` |
-| `calibration.report.json` | Gain scores, fit diagnostics, reference position/M2, and calibration sampling/filter options; not read during alignment |
+| `calibration.report.json` | Gain scores, fit diagnostics, reference position/M2, and calibration measurement/filter settings; not read during alignment |
 
 Use `--alignment-config` and `--report` to choose other output paths. All output
 paths must differ. `--observations` optionally saves per-image evaluation results.
 Generated alignment settings are a starting point: adjust permitted travel,
 minimum useful step, BO settings, and budgets for the instrument or replay grid.
 
-The calibration stores only the forward `jacobian`; the controller solves
-`J delta = e` at runtime. Image evaluator settings and `centroid_percentile` stay
-with calibration so the feature definition remains consistent. `reference_center`
-and `image_shape` support compatibility checks. `calibration_bounds` records the
-sampled envelope; `gain_max_step` records the step limit used to select eta.
-The configured runtime `max_step` can be smaller than this limit. These metadata
-are separate from operational confidence thresholds and motor limits.
+Alignment reads exactly three calibration quantities: `eta`, the forward
+`jacobian`, and `reference_error`. The controller solves `J delta = e` at runtime.
+`reference_error` is the relative CoM-to-ellipse-center offset, expressed in pixels.
+Each image supplies its own fitted center, semiaxes, and dimensions. Translations
+of the illumination and changes to the image canvas are supported.
 
-Version 1 calibration files must be regenerated with the updated calibration
-script. The bundled [calibration](../scripts/calibration.json),
+Configure image processing for the current run through `evaluator` (the fields
+of `evaluate_alignment.Config`) and `centroid_percentile` in the alignment JSON.
+The default evaluator fits the semiaxes independently for each image. To fix
+semiaxes for a particular run, explicitly supply both `inner_axes` and
+`outer_axes` in `evaluator`. Motor units, travel bounds, and step limits likewise
+come from the runtime configuration, with units checked against the adapter.
+
+The bundled [calibration](../scripts/calibration.json),
 [alignment settings](../scripts/calibration.alignment.json), and
-[report](../scripts/calibration.report.json) use the new format and preserve the
-previous fitted eta and Jacobian. Reuse them only under matching image and motor
-conditions.
+[report](../scripts/calibration.report.json) keep the fitted response, runtime
+choices, and historical calibration diagnostics separate. Additional fields in
+older calibration files are ignored. Remove `max_center_shift` from older
+runtime configurations; fitting options belong in their `evaluator` object.
 
 The bundled runtime file overrides eta to `0.75`, sets `enter_m1 = 0.012` and
 `exit_m1 = 0.02`, and limits total acquisitions to 30. The tighter entry gate
 keeps the controller following the centroid correction longer before local BO.
-These settings were verified on interpolated recorded images starting at
-(-15, -15) um with seed 0, reaching within ±2 um on both axes in 29 acquisitions
-including final confirmations. This is a simulator result under the recorded
-conditions, not a guarantee for arbitrary starting positions or live data.
+Their earlier simulator tuning used explicitly fixed semiaxes. Choose fitting
+options for the current images when assessing convergence and comparing M2.
 The parameter table below lists script defaults; explicit runtime settings
 override them. New calibration runs emit initial settings for local tuning.
 
-The reference is fitted first; its inner and outer semiaxes are then fixed for
-all subsequent fits. Each fit can translate and rotate. To specify semiaxes or
+During calibration, the reference is fitted first; its inner and outer semiaxes
+are then fixed for the remaining calibration images. Each fit can translate and rotate. To specify semiaxes or
 change edge detection, background subtraction, or intensity normalization, pass
 `--evaluator-config evaluator.json`, containing fields from the evaluator's
 `Config`, for example:
@@ -176,7 +179,6 @@ Calibration options:
 | `--centroid-percentile` | 10 | Per-image background percentile for centroid weights |
 | `--min-vector` | 0.5 | Minimum reference-corrected centroid error in pixels |
 | `--min-coverage` | 0.5 | Required support fraction on each candidate boundary for direction estimation |
-| `--max-center-shift` | 40 | Maximum fitted-center distance from reference, in pixels |
 | `--max-condition` | 100 | Maximum response-matrix condition number, including held-out fits |
 
 Review calibration diagnostics before use. The saved envelope describes sampled
@@ -210,7 +212,8 @@ motor units and limits that must be replaced with appropriate local values:
 | `min_step` | 0.5 | Smallest trial displacement in motor units |
 | `min_vector` | 0.5 | Minimum centroid error in pixels for using its direction |
 | `min_coverage` | 0.5 | Minimum support fraction on each candidate boundary for using the centroid direction |
-| `max_center_shift` | 40 | Maximum fitted-center displacement from the calibrated reference center, in pixels |
+| `evaluator` | `{}` | Current-run evaluator options; omit semiaxes to fit them per image, or supply both to fix them |
+| `centroid_percentile` | 10 | Per-image background percentile for centroid weights |
 | `eta` | calibration value | Positive gain override for coarse correction |
 | `enter_m1`, `exit_m1` | 0.02, 0.03 | Fine-stage entry and coarse-stage recovery thresholds; entry < exit |
 | `geometry_improvement` | 0.0001 | Minimum diagnostic geometry decrease for accepting a coarse trial |
@@ -227,15 +230,14 @@ motor units and limits that must be replaced with appropriate local values:
 | `target_m2` | null | Optional absolute M2 target under the calibrated intensity conditions |
 | `seed` | 0 | Random seed for reproducible candidate generation |
 
-Bounds must stay inside the calibration envelope and `max_step` must not exceed
-`gain_max_step` recorded in calibration. All settings and the calibration are recorded at
+Set bounds and `max_step` for the current instrument. All settings and the calibration are recorded at
 the beginning of the trajectory. Thresholds are prototype settings to qualify
 with repeated measurements at the local instrument; they are not universal.
 
 ### Coarse stage
 
 Use the full correction `-eta * solve(J, e)` when the feature passes the runtime
-configuration's vector, coverage, and center-shift checks. Scale its Euclidean
+configuration's vector and boundary-coverage checks. Scale its Euclidean
 length into `[min_step, max_step]`, preserving the component ratio. Shorten it
 further at travel bounds along the same direction; skip a move if the available
 travel is shorter than `min_step`. Recompute the correction after each accepted
@@ -259,8 +261,8 @@ run and leave recovery to the instrument procedure.
 ### Fine stage
 
 After consecutive valid images satisfy `M1 <= enter_m1`, minimize M2 using local
-Bayesian optimization. The ellipse semiaxes remain fixed; they are image geometry
-parameters, separate from the motor search bounds. At motor position `(5,5)`,
+Bayesian optimization. Optional fixed ellipse semiaxes are image geometry
+parameters configured for the current run, separate from the motor search bounds. At motor position `(5,5)`,
 half-widths `(D,D)` define a symmetric box `[5-D,5+D]` on both axes, clipped to
 permitted travel and the per-move displacement limit.
 

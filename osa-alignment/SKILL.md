@@ -127,8 +127,8 @@ are unusable, not that the physical intensity is infinite. A finite diagnostic
 
 [scripts/calibrate_alignment.py](scripts/calibrate_alignment.py) uses recorded
 images at known motor positions around a good reference to estimate the reference
-centroid offset, motor response, and step gain eta. It saves these with the fixed
-ellipse semiaxes and compatibility metadata in a compact calibration JSON file.
+centroid offset, motor response, and step gain eta. Its calibration JSON contains
+only `reference_error`, `jacobian`, and `eta`.
 Runtime settings and diagnostics are saved separately as `calibration.alignment.json`
 and `calibration.report.json` by default. Reuse an existing calibration when
 its optics, camera orientation, units, and intensity conditions still apply.
@@ -148,12 +148,15 @@ then constrained local Bayesian optimization of M2 once M1 meets its threshold.
 The calibration file is required. Eta defaults to its calibrated value and can
 be overridden in the alignment configuration. The bundled
 [calibration](scripts/calibration.json) and [runtime settings](scripts/calibration.alignment.json)
-are available for matching image and motor conditions; diagnostics are in the
+are available for a compatible motor-to-centroid response; diagnostics are in the
 [separate report](scripts/calibration.report.json).
 The bundled runtime settings use `eta = 0.75`, BO entry at `M1 <= 0.012`,
 coarse recovery above `0.02`, and a 30-acquisition budget including restores
-and confirmations. These settings were tuned on interpolated recorded images;
-qualify them under the instrument's acquisition conditions.
+and confirmations. Configure image fitting for the current run through the
+runtime `evaluator` object and `centroid_percentile` (default 10). Semiaxes are
+fitted per image unless both `inner_axes` and `outer_axes` are explicitly supplied
+in `evaluator`. Image dimensions and absolute ellipse position may differ from
+the calibration images.
 
 ```sh
 uv run --project scripts --locked python scripts/align_osa.py \

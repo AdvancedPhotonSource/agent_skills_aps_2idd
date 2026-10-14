@@ -1,38 +1,5 @@
 {
-  "version": 2,
-  "units": "um",
-  "evaluator": {
-    "inner_axes": [
-      37.841116892118016,
-      33.66231727280725
-    ],
-    "outer_axes": [
-      102.1991801297988,
-      91.9040576715142
-    ],
-    "sigma": 2.0,
-    "edge_low": 0.04,
-    "edge_high": 0.1,
-    "coverage_weight": 0.5,
-    "edge_tolerance": null,
-    "min_coverage": 0.65,
-    "max_gap_degrees": 90.0,
-    "background": 0.0,
-    "intensity_normalizer": 1.0
-  },
-  "centroid_percentile": 10.0,
-  "reference_error": [
-    -0.21009726905058526,
-    -0.38055562343432453
-  ],
-  "reference_center": [
-    445.8063576217666,
-    242.86892943662056
-  ],
-  "image_shape": [
-    480,
-    720
-  ],
+  "eta": 1.5,
   "jacobian": [
     [
       -0.6708759710978064,
@@ -43,16 +10,8 @@
       0.75256110779302
     ]
   ],
-  "eta": 1.5,
-  "calibration_bounds": [
-    [
-      -15.0,
-      15.0
-    ],
-    [
-      -15.0,
-      15.0
-    ]
-  ],
-  "gain_max_step": 5.0
+  "reference_error": [
+    -0.21009726905058526,
+    -0.38055562343432453
+  ]
 }

@@ -54,10 +54,10 @@ def centroid_offset(image, result, percentile=10.0):
     return np.array([(weights * dx).sum(), (weights * dy).sum()]) / total
 
 
-def measure(path, calibration):
+def measure(path, calibration, *, config=None, centroid_percentile=10.0):
     image = read_image(path)
-    result = evaluate(image, Config(**calibration["evaluator"]))
-    offset = centroid_offset(image, result, calibration["centroid_percentile"])
+    result = evaluate(image, Config() if config is None else config)
+    offset = centroid_offset(image, result, centroid_percentile)
     error = None if offset is None else offset - np.asarray(calibration["reference_error"])
     appearance = {}
     if result.get("fit") is not None:
@@ -127,14 +127,14 @@ def fit_response(positions, errors, gains, max_step, max_condition=100.0):
 
 def calibrate(manifest, reference, config, *, gains, max_step, coarse_threshold=0.02,
               centroid_percentile=10.0, min_vector=0.5, min_coverage=0.5,
-              max_center_shift=40.0, max_condition=100.0):
+              max_condition=100.0):
     config.validate()
     parameters = [*reference, *gains, max_step, coarse_threshold, centroid_percentile,
-                  min_vector, min_coverage, max_center_shift, max_condition]
+                  min_vector, min_coverage, max_condition]
     if (not np.isfinite(parameters).all() or not gains or min(gains) <= 0
         or max_step <= 0 or coarse_threshold <= 0 or not 0 <= centroid_percentile < 100
         or min_vector < 0 or not 0 <= min_coverage <= 1
-        or max_center_shift <= 0 or max_condition < 1):
+        or max_condition < 1):
         raise ValueError("Invalid calibration parameters")
     reference = np.asarray(reference, float)
     refs = [r for r in manifest["samples"] if np.allclose(r["position"], reference, atol=1e-9, rtol=0)]
@@ -145,11 +145,10 @@ def calibrate(manifest, reference, config, *, gains, max_step, coarse_threshold=
         raise ValueError("Reference image must have a valid ellipse fit")
     config = replace(config, inner_axes=tuple(first["fit"]["inner_axes"]),
                      outer_axes=tuple(first["fit"]["outer_axes"]))
-    artifact = {"version": 2, "units": manifest["units"], "evaluator": asdict(config),
-                "centroid_percentile": centroid_percentile, "reference_error": [0., 0.]}
+    artifact = {"reference_error": [0., 0.]}
     observations = []
     for row in manifest["samples"]:
-        obs = measure(row["image"], artifact)
+        obs = measure(row["image"], artifact, config=config, centroid_percentile=centroid_percentile)
         obs["position"] = row["position"]
         observations.append(obs)
         print(f"Calibration {len(observations)}/{len(manifest['samples'])}: "
@@ -159,8 +158,6 @@ def calibrate(manifest, reference, config, *, gains, max_step, coarse_threshold=
            or o["error"] is None for o in reference_obs):
         raise ValueError("All reference images must satisfy the coarse threshold with fixed semiaxes")
     reference_error = np.mean([o["error"] for o in reference_obs], axis=0)
-    center = np.mean([[o["metrics"]["fit"]["center_x"], o["metrics"]["fit"]["center_y"]]
-                      for o in reference_obs], axis=0)
     positions, errors = [], []
     for obs in observations:
         m, e = obs["metrics"], obs["error"]
@@ -168,9 +165,7 @@ def calibrate(manifest, reference, config, *, gains, max_step, coarse_threshold=
             continue
         e = np.asarray(e) - reference_error
         obs["error"] = e.tolist()
-        fit = m["fit"]
-        shift = np.linalg.norm(np.array([fit["center_x"], fit["center_y"]]) - center)
-        usable = (np.linalg.norm(e) >= min_vector and shift <= max_center_shift
+        usable = (np.linalg.norm(e) >= min_vector
                   and min(m["inner_coverage"], m["outer_coverage"]) >= min_coverage
                   and float(m["geometry_score"]) >= coarse_threshold
                   and not np.allclose(obs["position"], reference, atol=1e-9, rtol=0))
@@ -180,27 +175,26 @@ def calibrate(manifest, reference, config, *, gains, max_step, coarse_threshold=
             errors.append(e)
     response = fit_response(positions, errors, gains, max_step, max_condition)
     artifact.update(jacobian=response["jacobian"], eta=response["eta"],
-                    reference_error=reference_error.tolist(), reference_center=center.tolist(),
-                    image_shape=first["image_shape"], gain_max_step=max_step,
-                    calibration_bounds=np.array([np.min([o["position"] for o in observations], axis=0),
-                                                 np.max([o["position"] for o in observations], axis=0)]).T.tolist())
-    report = {"diagnostics": response["diagnostics"],
+                    reference_error=reference_error.tolist())
+    report = {"diagnostics": response["diagnostics"], "units": manifest["units"],
+              "bounds": np.array([np.min([o["position"] for o in observations], axis=0),
+                                  np.max([o["position"] for o in observations], axis=0)]).T.tolist(),
+              "evaluator": asdict(config),
               "reference_position": reference.tolist(),
               "reference_m2": float(np.mean([o["metrics"]["secondary_metric"] for o in reference_obs])),
               "calibration_options": {"eta_grid": gains, "max_step": max_step,
                   "coarse_threshold": coarse_threshold, "min_vector": min_vector,
-                  "min_coverage": min_coverage, "max_center_shift": max_center_shift,
+                  "min_coverage": min_coverage, "centroid_percentile": centroid_percentile,
                   "max_condition": max_condition}}
     return artifact, report, observations
 
 
-def alignment_settings(calibration, report):
-    """Suggested runtime settings matching the calibration's envelope and filters."""
+def alignment_settings(report):
+    """Initial runtime limits and feature settings, adjustable for each alignment run."""
     options = report["calibration_options"]
-    return {"units": calibration["units"], "bounds": calibration["calibration_bounds"],
-            "max_step": calibration["gain_max_step"],
-            "min_step": min(0.5, calibration["gain_max_step"]),
-            **{name: options[name] for name in ("min_vector", "min_coverage", "max_center_shift")}}
+    return {"units": report["units"], "bounds": report["bounds"],
+            "max_step": options["max_step"], "min_step": min(0.5, options["max_step"]),
+            **{name: options[name] for name in ("min_vector", "min_coverage", "centroid_percentile")}}
 
 
 def main():
@@ -219,7 +213,6 @@ def main():
     parser.add_argument("--centroid-percentile", type=float, default=10.)
     parser.add_argument("--min-vector", type=float, default=0.5)
     parser.add_argument("--min-coverage", type=float, default=0.5)
-    parser.add_argument("--max-center-shift", type=float, default=40.)
     parser.add_argument("--max-condition", type=float, default=100.)
     args = parser.parse_args()
     report_path = args.report or args.output.with_suffix(".report.json")
@@ -231,11 +224,11 @@ def main():
     artifact, report, observations = calibrate(load_manifest(args.manifest), args.reference_position, config,
         gains=args.eta_grid, max_step=args.max_step, coarse_threshold=args.coarse_threshold,
         centroid_percentile=args.centroid_percentile, min_vector=args.min_vector,
-        min_coverage=args.min_coverage, max_center_shift=args.max_center_shift,
+        min_coverage=args.min_coverage,
         max_condition=args.max_condition)
     write_json(args.output, artifact)
     write_json(report_path, report)
-    write_json(settings_path, alignment_settings(artifact, report))
+    write_json(settings_path, alignment_settings(report))
     if args.observations:
         write_json(args.observations, observations)
     print(json.dumps(report["diagnostics"], indent=2))
