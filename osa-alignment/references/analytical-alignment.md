@@ -330,6 +330,42 @@ reusing an image is not an independent confirmation or a fresh noise sample.
 The result explicitly identifies replay. Calibration and replay on the same data
 are development checks, not held-out evidence of convergence on an instrument.
 
+## Live dashboard
+
+Append `--webui` to either an adapter or replay command:
+
+```sh
+uv run --project scripts --locked python scripts/align_osa.py \
+  --calibration calibration.json --config calibration.alignment.json \
+  --adapter beamline_adapter:create_adapter --adapter-config beamline.json \
+  --log trajectory.jsonl --output result.json --webui --webui-port 8765
+```
+
+Open the printed URL, normally `http://127.0.0.1:8765/`, while alignment runs.
+The dashboard shows settings and calibration, the latest acquired image,
+acquisition positions, M1 with its BO entry threshold, M2, and observation history
+with stages and eligibility. Trajectory axes use equal motor-unit scales.
+Nonfinite metrics leave gaps in the charts and remain explicit in the table.
+Detector previews use per-image linear min/max scaling; metric calculations
+retain the original intensity units. The trajectory's latest marker denotes the
+latest acquisition; the completed run reports its final motor readback separately.
+
+The server reads the trajectory and saved images and refreshes once per second.
+It exposes read-only endpoints, binds to `127.0.0.1`, and uses the existing Python
+dependencies with no external browser libraries. Omit `--webui` to run without
+the server. Use `--webui-port 0` for an automatically selected port.
+
+For agent-launched runs, enable the flag, leave the command running, and give the
+user the printed URL. For an agent on a remote host, forward the selected port:
+`ssh -L 8765:127.0.0.1:8765 USER@HOST`, then open `http://127.0.0.1:8765/` locally.
+The script does not launch a browser or wait for user interaction.
+
+The server closes when the command exits, including blocked alignment outcomes.
+A self-contained snapshot is saved using the log filename with an `.html` suffix
+(for example, `trajectory.html`), preserving any existing file at that path.
+Open this snapshot for final results after the server closes; an already-open live
+page may show its last received state if the run finishes between refreshes.
+
 ## Beamline adapter placeholder
 
 Live use requires a facility implementation. No instrument control is bundled.

@@ -173,6 +173,15 @@ Live operation requires a facility implementation of the
 motion and acquisition remain placeholders until it is supplied. For recorded
 images, use [offline replay](references/analytical-alignment.md#offline-replay).
 
+Add `--webui` to show a read-only live dashboard with the run settings, latest
+image, search trajectory, and M1/M2 histories. The script prints its local URL
+(default `http://127.0.0.1:8765/`); `--webui-port PORT` selects another port,
+and `0` selects an available port. Agents can enable this flag and share the URL
+while keeping the alignment process running. The dashboard refreshes every second
+and requires no browser on the agent's host. At exit, a self-contained HTML
+snapshot is saved beside the trajectory log. See
+[dashboard access and lifecycle](references/analytical-alignment.md#live-dashboard).
+
 [Alignment settings](references/analytical-alignment.md#alignment-settings) configure
 motor bounds, step limits, thresholds, GP parameters, and acquisition budgets.
 The script handles readback verification, trial recovery, confirmation, and

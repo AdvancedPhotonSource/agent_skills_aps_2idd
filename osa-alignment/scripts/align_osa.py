@@ -496,7 +496,11 @@ def main():
     parser.add_argument("--start", type=float, nargs=2, help="Replay starting position")
     parser.add_argument("--log", type=Path, required=True, help="New JSONL trajectory file")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--webui", action="store_true", help="Serve a read-only live dashboard")
+    parser.add_argument("--webui-port", type=int, default=8765, help="Local dashboard port (0 selects a free port)")
     args = parser.parse_args()
+    if not 0 <= args.webui_port <= 65535:
+        parser.error("--webui-port must be between 0 and 65535")
     calibration = json.loads(args.calibration.read_text())
     settings = Settings(**json.loads(args.config.read_text()))
     settings.validate(calibration)
@@ -510,8 +514,19 @@ def main():
         module, factory = args.adapter.split(":", 1)
         options = json.loads(args.adapter_config.read_text()) if args.adapter_config else {}
         backend = getattr(importlib.import_module(module), factory)(options)
-    result = Controller(calibration, settings, backend, args.log).run()
-    write_json(args.output, result)
+    controller = Controller(calibration, settings, backend, args.log)
+    dashboard = None
+    if args.webui:
+        from alignment_webui import Dashboard
+        dashboard = Dashboard(args.log, port=args.webui_port)
+        dashboard.start()
+        print(f"OSA web UI: {dashboard.url} (read-only)", flush=True)
+    try:
+        result = controller.run()
+        write_json(args.output, result)
+    finally:
+        if dashboard is not None:
+            dashboard.close()
     if result["status"] == "blocked":
         raise SystemExit(2)
 
