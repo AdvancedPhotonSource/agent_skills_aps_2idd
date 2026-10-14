@@ -226,6 +226,7 @@ motor units and limits that must be replaced with appropriate local values:
 | `gp_length_scale` | [2.5, 2.5] | Initial Matérn-5/2 length scales and fallback before three distinct eligible locations, in motor units |
 | `gp_length_scale_bounds` | [0.5, 10] | Positive finite lower/upper bounds shared by both fitted spatial scales, in motor units |
 | `gp_noise` | 0.05 | Observation standard deviation in standardized GP target units; squared for GP alpha |
+| `gp_coarse_noise_multiplier` | 3 | Multiplier on `gp_noise` for `coarse` observations; finite and at least 1; default gives nine times the variance |
 | `bo_candidates` | 256 | Random candidate count per continuous BO iteration |
 | `ei_xi` | 0 | EI improvement margin in M2 units |
 | `min_ei` | 0 | Stop if maximum EI is at most this value, in M2 units |
@@ -274,7 +275,11 @@ One Matérn-5/2 GP models M2. All valid observations with finite M1 at or below
 the threshold and finite M2 enter its training set, including worse M2 values
 and repeated confirmations. The acquisition function is expected improvement
 `EI(M2)` relative to the lowest eligible observed M2. Targets are standardized,
-and `gp_noise**2` is the observation variance in standardized units. After three
+and each observation receives a diagonal noise variance in standardized units.
+For observations labeled `coarse`, the variance is
+`(gp_noise * gp_coarse_noise_multiplier)**2`; other stages use `gp_noise**2`.
+The default multiplier of 3 reduces coarse measurements' influence with nine
+times the variance. Set it to 1 for equal observation noise. After three
 distinct eligible locations, fit anisotropic length scales by maximizing marginal
 likelihood within `gp_length_scale_bounds`; before then, use `gp_length_scale`
 as a configured fallback. Each iteration rebuilds the GP from eligible history

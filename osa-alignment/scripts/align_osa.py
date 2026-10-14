@@ -40,6 +40,7 @@ class Settings:
     gp_length_scale_bounds: tuple[float, float] = (0.5, 10.)
     bo_initial_samples: int = 5
     gp_noise: float = 0.05
+    gp_coarse_noise_multiplier: float = 3.0
     ei_xi: float = 0.0
     min_ei: float = 0.0
     bo_candidates: int = 256
@@ -51,7 +52,8 @@ class Settings:
         numbers = [self.max_step, self.min_step, self.bo_stage_entrance_m1,
                    self.geometry_improvement, self.readback_tolerance,
                    *self.bo_halfwidth, *self.gp_length_scale, *self.gp_length_scale_bounds, self.gp_noise, self.ei_xi, self.min_ei,
-                   self.min_vector, self.min_coverage, self.centroid_percentile]
+                   self.min_vector, self.min_coverage, self.centroid_percentile,
+                   self.gp_coarse_noise_multiplier]
         if (bounds.shape != (2, 2) or not np.isfinite(bounds).all()
             or np.any(bounds[:, 0] >= bounds[:, 1]) or not np.isfinite(numbers).all()
             or self.min_vector < 0 or not 0 <= self.min_coverage <= 1
@@ -65,6 +67,7 @@ class Settings:
             or any(not self.gp_length_scale_bounds[0] <= v <= self.gp_length_scale_bounds[1]
                    for v in self.gp_length_scale)
             or self.gp_noise <= 0 or self.readback_tolerance <= 0
+            or self.gp_coarse_noise_multiplier < 1
             or min(self.geometry_improvement, self.ei_xi, self.min_ei) < 0):
             raise ValueError("Invalid bounds, thresholds, step sizes, or GP settings")
         if (not all(isinstance(x, int) for x in [self.max_acquisitions, self.confirmations,
@@ -136,11 +139,14 @@ def fit_objective(observations, settings):
         raise ValueError("Expected improvement needs an eligible observation")
     x = np.array([o["position"] for o in eligible])
     y = np.array([float(o["metrics"]["secondary_metric"]) for o in eligible])
+    noise = np.array([settings.gp_noise * (
+        settings.gp_coarse_noise_multiplier if o.get("stage") == "coarse" else 1.)
+        for o in eligible])
     # Repeated confirmations alone cannot identify spatial length scales.
     fitted = len(np.unique(x, axis=0)) >= 3
     kernel = Matern(length_scale=settings.gp_length_scale,
                     length_scale_bounds=settings.gp_length_scale_bounds, nu=2.5)
-    gp = GaussianProcessRegressor(kernel=kernel, alpha=settings.gp_noise ** 2,
+    gp = GaussianProcessRegressor(kernel=kernel, alpha=noise ** 2,
                                   normalize_y=True,
                                   optimizer="fmin_l_bfgs_b" if fitted else None)
     gp.fit(x, y)

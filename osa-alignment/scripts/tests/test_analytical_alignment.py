@@ -123,6 +123,36 @@ def test_gp_uses_only_eligible_objectives():
     assert np.all(scores >= 0)
 
 
+def test_gp_noise_tracks_eligible_observation_stages():
+    observations = []
+    stages = ['baseline', 'coarse', 'restore', 'confirm', 'bo_init', 'bo', 'final', None]
+    for stage in stages:
+        obs = observation([0, 0])
+        if stage is not None:
+            obs['stage'] = stage
+        observations.append(obs)
+    rejected = observation([1, 0], invalid=True)
+    rejected['stage'] = 'coarse'
+    observations.insert(1, rejected)
+    gp, _ = fit_objective(observations, settings())
+    np.testing.assert_allclose(gp.alpha, [.0025, .0225, .0025, .0025,
+                                        .0025, .0025, .0025, .0025])
+
+
+def test_coarse_noise_reduces_influence_on_gp_prediction():
+    coarse = observation([0, 0])
+    coarse.update(stage='coarse')
+    coarse['metrics']['secondary_metric'] = 2.
+    fine = observation([0, 0])
+    fine.update(stage='bo')
+    fine['metrics']['secondary_metric'] = 0.
+    equal, _ = fit_objective([coarse, fine], settings(gp_coarse_noise_multiplier=1.))
+    weighted, _ = fit_objective([coarse, fine], settings())
+    np.testing.assert_allclose(equal.alpha, [.0025, .0025])
+    np.testing.assert_allclose(equal.predict([[0, 0]]), [1.])
+    assert 0. < weighted.predict([[0, 0]])[0] < equal.predict([[0, 0]])[0]
+
+
 def test_readback_fault_stops_without_recovery_motion(tmp_path):
     class Faulty(SyntheticBackend):
         def move_absolute(self, target):
@@ -501,7 +531,9 @@ def test_final_return_uses_bounded_transits_without_extra_images(tmp_path, repla
 
 @pytest.mark.parametrize('options', [dict(bo_initial_samples=-1), dict(bo_initial_samples=1.5),
     dict(gp_length_scale_bounds=[0, 10]), dict(gp_length_scale_bounds=[3, 2]),
-    dict(gp_length_scale_bounds=[.1, float('inf')]), dict(gp_length_scale=[.1, 2])])
+    dict(gp_length_scale_bounds=[.1, float('inf')]), dict(gp_length_scale=[.1, 2]),
+    dict(gp_coarse_noise_multiplier=.5), dict(gp_coarse_noise_multiplier=float('inf')),
+    dict(gp_coarse_noise_multiplier=float('nan'))])
 def test_bo_settings_validation(options):
     with pytest.raises(ValueError):
         settings(**options).validate(calibration())
