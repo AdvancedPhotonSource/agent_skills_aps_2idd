@@ -9,7 +9,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from calibrate_alignment import centroid_offset, fit_response, measure
-from align_osa import Controller, Replay, Settings, constrained_ei
+from align_osa import Controller, Replay, Settings, fit_objective, expected_improvement, feasible
 from evaluate_alignment import Config
 
 
@@ -114,11 +114,13 @@ def test_rejected_trial_restores_before_further_search(tmp_path):
     assert [o["stage"] for o in controller.history[-2:]] == ["final", "final"]
 
 
-def test_gp_handles_infinite_metrics_and_both_validity_classes():
+def test_gp_uses_only_eligible_objectives():
     observations = [observation([0, 0]), observation([1, 0]), observation([10, 10], invalid=True)]
-    scores = constrained_ei(observations, np.array([[0, 1], [9, 10]]), settings())
+    gp, fitted = fit_objective(observations, settings())
+    assert len(gp.X_train_) == 2 and not fitted
+    scores = expected_improvement(gp, np.array([[0, 1], [9, 10]]), 10., settings())
     assert np.isfinite(scores).all()
-    assert scores[0] > scores[1] >= 0
+    assert np.all(scores >= 0)
 
 
 def test_readback_fault_stops_without_recovery_motion(tmp_path):
@@ -142,7 +144,7 @@ def test_replay_is_exact_discrete_and_cycles_repeats():
         backend.move_absolute([.1, 0])
 
 
-@pytest.mark.parametrize("options", [dict(max_step=0), dict(enter_m1=.04),
+@pytest.mark.parametrize("options", [dict(max_step=0), dict(bo_stage_entrance_m1=0),
                                    dict(bounds=[[15, -15], [-15, 15]]), dict(eta=0),
                                    dict(max_acquisitions=3)])
 def test_unsafe_settings_rejected(options):
@@ -182,11 +184,13 @@ def test_final_target_must_survive_confirmation(tmp_path):
     assert result["reason"] == "M2 target not sustained during final confirmation"
 
 
-def test_all_missing_boundaries_do_not_train_geometry_gp():
+def test_missing_boundaries_do_not_train_objective_gp():
     missing = observation([10, 10], invalid=True)
     missing["metrics"]["geometry_score"] = float("inf")
     missing["metrics"]["fit"] = None
-    scores = constrained_ei([observation([0, 0]), missing], np.array([[1, 0], [9, 10]]), settings())
+    gp, fitted = fit_objective([observation([0, 0]), missing], settings())
+    assert len(gp.X_train_) == 1 and not fitted
+    scores = expected_improvement(gp, np.array([[1, 0], [9, 10]]), 10., settings())
     assert np.isfinite(scores).all()
     assert np.all(scores >= 0)
 
@@ -316,7 +320,7 @@ def test_measurement_and_controller_accept_translated_resized_images(tmp_path, f
             return paths[(self.acquisitions - 1) % 2]
 
     backend = Images([0, 0])
-    c = Controller(cal, settings(evaluator=evaluator, enter_m1=.05, exit_m1=.06,
+    c = Controller(cal, settings(evaluator=evaluator, bo_stage_entrance_m1=.05,
                                 target_m2=1e9), backend, tmp_path / 'trajectory')
     result = c.run()
     assert result['status'] == 'metric_target_reached'
@@ -367,3 +371,175 @@ def test_bundled_calibration_and_config_are_compatible():
     runtime = json.loads((root / 'calibration.alignment.json').read_text())
     Settings(**runtime).validate(cal)
     assert cal['eta'] == 1.5
+
+
+def test_worse_eligible_m2_changes_gp_but_rejected_metrics_do_not():
+    good = observation([0, 0])
+    worse = observation([1, 0])
+    high_m1 = observation([8, 0])
+    missing_m2 = observation([0, 1])
+    missing_m2['metrics']['secondary_metric'] = float('inf')
+    gp_before, _ = fit_objective([good], settings())
+    gp_after, _ = fit_objective([good, worse, high_m1, missing_m2], settings())
+    np.testing.assert_array_equal(gp_after.X_train_, [[0, 0], [1, 0]])
+    assert gp_after.predict([[1, 0]])[0] > gp_before.predict([[1, 0]])[0]
+    observations = [good, worse, observation([0, 2])]
+    gp_fitted, fitted = fit_objective(observations, settings())
+    assert fitted
+    assert np.all(gp_fitted.kernel_.length_scale >= .5)
+    assert np.all(gp_fitted.kernel_.length_scale <= 10.)
+    assert not np.allclose(gp_fitted.kernel_.length_scale, [2.5, 2.5])
+
+
+def test_initialization_counts_eligible_random_measurements_and_reuses_coarse(tmp_path, monkeypatch):
+    backend = SyntheticBackend([0, 0])
+    def measured(p, cal):
+        obs = observation(p, invalid=backend.acquisitions == 3)
+        if obs['metrics']['valid']:
+            obs['metrics']['primary_metric'] = .01
+        return obs
+    c = Controller(calibration(), settings(target_m2=None, max_acquisitions=11),
+                   backend, tmp_path / 'log', measured)
+    points = iter([[1, 0], [-1, 0], [-2, 0], [-2, 1], [-1, 1], [0, 1], [0, 2]])
+    monkeypatch.setattr(c, 'candidates', lambda incumbent: np.array([next(points)], float))
+    result = c.run()
+    initial = [o for o in c.history if o['stage'] == 'bo_init']
+    assert len(initial) == 6
+    assert sum(o['bo_eligible'] for o in initial) == 5
+    assert len({tuple(o['position']) for o in initial}) == 6
+    assert initial[0]['bo_rejection_reason'] == 'invalid fit'
+    assert [o['stage'] for o in c.history] == ['baseline', 'confirm'] + ['bo_init'] * 6 + ['bo'] + ['final'] * 2
+    assert result['final_readback'] == [0, 0]
+    models = [e for e in map(json.loads, (tmp_path / 'log').read_text().splitlines()) if e['event'] == 'bo_model']
+    assert models[-1]['training_acquisitions'] == [1, 2, 4, 5, 6, 7, 8]
+    assert models[-1]['exclusion_acquisitions'] == [3]
+    assert result['acquisitions'] == 11
+
+
+@pytest.mark.parametrize('invalid', [False, True])
+def test_initialization_budget_exhaustion_reserves_final_confirmations(tmp_path, invalid):
+    backend = SyntheticBackend([0, 0])
+    def measured(p, cal):
+        obs = observation(p, invalid=invalid and backend.acquisitions > 2 and np.any(p))
+        if obs['metrics']['valid']:
+            obs['metrics']['primary_metric'] = .01
+        return obs
+    c = Controller(calibration(), settings(target_m2=None, bo_initial_samples=20, max_acquisitions=8),
+                   backend, tmp_path / 'log', measured)
+    result = c.run()
+    assert result['reason'] == 'random initialization budget exhausted'
+    assert result['acquisitions'] == 8
+    assert result['status'] == 'best_found'
+    assert [o['stage'] for o in c.history[-2:]] == ['final', 'final']
+    assert not any(o['stage'] in ('restore', 'bo') for o in c.history)
+
+
+def test_exclusions_use_current_anisotropic_scales_and_actual_readback(tmp_path):
+    backend = SyntheticBackend([4, 0])
+    c = Controller(calibration(), settings(target_m2=None, max_step=3, bo_halfwidth=[4, 3]),
+                   backend, tmp_path / 'log')
+    best = observation([0, 0])
+    high = observation([2, 0])
+    high['metrics']['primary_metric'] = .03
+    invalid = observation([3, 2], invalid=True)
+    c.history = [best, high, invalid]
+    c.length_scales = np.array([2., 1.])
+    pool = c.candidates(best)
+    assert len(pool)
+    assert np.all(np.linalg.norm(pool - [4, 0], axis=1) <= 3)
+    assert np.all(np.abs(pool) <= [4, 3])
+    for rejected in [high, invalid]:
+        assert np.all(np.sum(((pool - rejected['position']) / [2., 1.]) ** 2, axis=1) > 1)
+    assert not any(np.array_equal(p, [2, 1]) for p in pool)  # On exclusion boundary.
+    c.length_scales = np.array([.5, .5])
+    smaller = c.candidates(best)
+    assert len(smaller) > len(pool)
+    assert any(np.array_equal(p, [2, 1]) for p in smaller)
+
+
+def test_exhausted_exclusions_stop_initialization_and_confirm_best(tmp_path):
+    backend = SyntheticBackend([0, 0])
+    backend.candidate_positions = np.array([[1, 0]])
+    def measured(p, cal):
+        obs = observation(p)
+        if np.any(p):
+            obs['metrics']['primary_metric'] = .03
+        return obs
+    c = Controller(calibration(), settings(target_m2=None), backend, tmp_path / 'log', measured)
+    result = c.run()
+    assert 'no sampleable candidates' in result['reason']
+    assert 'random initialization incomplete' in result['reason']
+    assert result['status'] == 'best_found'
+    assert c.history[2]['bo_rejection_reason'].startswith('M1 exceeds')
+    assert result['acquisitions'] == 5
+    assert result['final_readback'] == [0, 0]
+
+
+@pytest.mark.parametrize('replay', [False, True])
+def test_final_return_uses_bounded_transits_without_extra_images(tmp_path, replay):
+    backend = (Replay(dict(units='um', samples=[dict(position=[x, 0], image=[x, 0])
+                                               for x in [0, 3, 6]]), [0, 0])
+               if replay else SyntheticBackend([0, 0]))
+    if not replay:
+        backend.candidate_positions = np.array([[3, 0], [6, 0]])
+    def measured(p, cal):
+        obs = observation(p)
+        obs['metrics']['primary_metric'] = .01
+        return obs
+    c = Controller(calibration(), settings(target_m2=None, max_step=3, bo_halfwidth=[8, 8],
+                   bo_initial_samples=2, max_acquisitions=6), backend, tmp_path / 'log', measured)
+    result = c.run()
+    assert result['status'] == 'best_found'
+    assert result['acquisitions'] == 6
+    assert result['final_readback'] == [0, 0]
+    assert [o['position'] for o in c.history] == [[0, 0], [0, 0], [3, 0], [6, 0], [0, 0], [0, 0]]
+    events = list(map(json.loads, (tmp_path / 'log').read_text().splitlines()))
+    transits = [e for e in events if e['event'] == 'plan' and e['stage'] == 'transit']
+    assert len(transits) >= 2
+    assert all(np.linalg.norm(np.array(e['target']) - e['previous_readback']) <= 3 for e in transits)
+
+
+@pytest.mark.parametrize('options', [dict(bo_initial_samples=-1), dict(bo_initial_samples=1.5),
+    dict(gp_length_scale_bounds=[0, 10]), dict(gp_length_scale_bounds=[3, 2]),
+    dict(gp_length_scale_bounds=[.1, float('inf')]), dict(gp_length_scale=[.1, 2])])
+def test_bo_settings_validation(options):
+    with pytest.raises(ValueError):
+        settings(**options).validate(calibration())
+
+
+def test_zero_random_samples_enters_ei_directly(tmp_path):
+    c = Controller(calibration(), settings(target_m2=None, bo_initial_samples=0, max_acquisitions=6),
+                   SyntheticBackend([0, 0]), tmp_path / 'log', lambda p, cal: observation(p))
+    c.run()
+    assert c.history[2]['stage'] == 'bo'
+    assert not any(o['stage'] == 'bo_init' for o in c.history)
+
+
+@pytest.mark.parametrize('metric', ['primary_metric', 'secondary_metric'])
+@pytest.mark.parametrize('value', [float('inf'), float('-inf'), float('nan')])
+def test_nonfinite_metrics_never_train_gp(metric, value):
+    bad = observation([1, 0])
+    bad['metrics'][metric] = value
+    assert not feasible(bad, settings())
+    gp, _ = fit_objective([observation([0, 0]), bad], settings())
+    np.testing.assert_array_equal(gp.X_train_, [[0, 0]])
+
+
+def test_final_transit_readback_fault_stops_without_confirmation(tmp_path):
+    class FaultyTransit(SyntheticBackend):
+        def move_absolute(self, target):
+            super().move_absolute(np.array(target) + ([1, 0] if self.acquisitions >= 4 else [0, 0]))
+    backend = FaultyTransit([0, 0])
+    backend.candidate_positions = np.array([[3, 0], [6, 0]])
+    def measured(p, cal):
+        obs = observation(p)
+        obs['metrics']['primary_metric'] = .01
+        return obs
+    c = Controller(calibration(), settings(target_m2=None, max_step=3, bo_halfwidth=[8, 8],
+                   bo_initial_samples=2, max_acquisitions=6), backend, tmp_path / 'log', measured)
+    result = c.run()
+    assert result['status'] == 'blocked'
+    assert 'readback' in result['reason']
+    assert result['acquisitions'] == backend.acquisitions == 4
+    assert len(backend.moves) == 3
+    assert not any(o['stage'] == 'final' for o in c.history)

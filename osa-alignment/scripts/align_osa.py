@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Align an OSA with calibrated vector corrections and constrained local Bayesian search."""
+"""Align an OSA with calibrated vector corrections and local Bayesian search."""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.stats import norm
-from sklearn.gaussian_process import GaussianProcessClassifier, GaussianProcessRegressor
+from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
 
 from calibrate_alignment import load_manifest, measure, write_json
@@ -30,15 +30,15 @@ class Settings:
     evaluator: dict = field(default_factory=dict)
     centroid_percentile: float = 10.0
     eta: float | None = None
-    enter_m1: float = 0.02
-    exit_m1: float = 0.03
+    bo_stage_entrance_m1: float = 0.02
     geometry_improvement: float = 0.0001
-    m2_improvement: float = 0.0
     max_acquisitions: int = 40
     confirmations: int = 2
     readback_tolerance: float = 0.001
     bo_halfwidth: tuple[float, float] = (5., 5.)
     gp_length_scale: tuple[float, float] = (2.5, 2.5)
+    gp_length_scale_bounds: tuple[float, float] = (0.5, 10.)
+    bo_initial_samples: int = 5
     gp_noise: float = 0.05
     ei_xi: float = 0.0
     min_ei: float = 0.0
@@ -48,25 +48,29 @@ class Settings:
 
     def validate(self, calibration):
         bounds = np.asarray(self.bounds, float)
-        numbers = [self.max_step, self.min_step, self.enter_m1, self.exit_m1,
-                   self.geometry_improvement, self.m2_improvement, self.readback_tolerance,
-                   *self.bo_halfwidth, *self.gp_length_scale, self.gp_noise, self.ei_xi, self.min_ei,
+        numbers = [self.max_step, self.min_step, self.bo_stage_entrance_m1,
+                   self.geometry_improvement, self.readback_tolerance,
+                   *self.bo_halfwidth, *self.gp_length_scale, *self.gp_length_scale_bounds, self.gp_noise, self.ei_xi, self.min_ei,
                    self.min_vector, self.min_coverage, self.centroid_percentile]
         if (bounds.shape != (2, 2) or not np.isfinite(bounds).all()
             or np.any(bounds[:, 0] >= bounds[:, 1]) or not np.isfinite(numbers).all()
             or self.min_vector < 0 or not 0 <= self.min_coverage <= 1
             or not 0 <= self.centroid_percentile < 100
             or not 0 < self.min_step <= self.max_step
-            or not 0 < self.enter_m1 < self.exit_m1
+            or not 0 < self.bo_stage_entrance_m1
             or min(self.bo_halfwidth) <= 0 or len(self.bo_halfwidth) != 2
             or min(self.gp_length_scale) <= 0 or len(self.gp_length_scale) != 2
+            or len(self.gp_length_scale_bounds) != 2
+            or not 0 < self.gp_length_scale_bounds[0] < self.gp_length_scale_bounds[1]
+            or any(not self.gp_length_scale_bounds[0] <= v <= self.gp_length_scale_bounds[1]
+                   for v in self.gp_length_scale)
             or self.gp_noise <= 0 or self.readback_tolerance <= 0
-            or min(self.geometry_improvement, self.m2_improvement, self.ei_xi, self.min_ei) < 0):
+            or min(self.geometry_improvement, self.ei_xi, self.min_ei) < 0):
             raise ValueError("Invalid bounds, thresholds, step sizes, or GP settings")
         if (not all(isinstance(x, int) for x in [self.max_acquisitions, self.confirmations,
-                                               self.bo_candidates, self.seed])
+                                               self.bo_candidates, self.bo_initial_samples, self.seed])
             or self.confirmations < 2 or self.max_acquisitions < self.confirmations + 3
-            or self.bo_candidates < 4 or self.seed < 0):
+            or self.bo_initial_samples < 0 or self.bo_candidates < 4 or self.seed < 0):
             raise ValueError("Require >=2 confirmations, sufficient acquisition budget, and >=4 candidates")
         if self.eta is not None and (not np.isfinite(self.eta) or self.eta <= 0):
             raise ValueError("eta must be positive and finite")
@@ -110,50 +114,45 @@ class Replay:
         return paths[count % len(paths)]
 
 
-def feasible(observation, settings):
+def eligible_geometry(observation, settings):
     m = observation["metrics"]
-    return bool(m["valid"] and float(m["primary_metric"]) <= settings.enter_m1
-                and np.isfinite(float(m["secondary_metric"])))
+    m1 = float(m["primary_metric"])
+    return bool(m["valid"] and np.isfinite(m1) and m1 <= settings.bo_stage_entrance_m1)
+
+
+def feasible(observation, settings):
+    return bool(eligible_geometry(observation, settings)
+                and np.isfinite(float(observation["metrics"]["secondary_metric"])))
 
 
 def geometry(observation):
     return float(observation["metrics"].get("geometry_score", float("inf")))
 
 
-def constrained_ei(observations, candidates, settings):
-    """Independent GP approximations: EI(M2) * P(geometry) * P(valid)."""
-    x = np.array([o["position"] for o in observations])
-    candidates = np.asarray(candidates)
-    kernel = Matern(length_scale=settings.gp_length_scale, length_scale_bounds="fixed", nu=2.5)
+def fit_objective(observations, settings):
+    """Fit only eligible M2, including repeats and worse objective values."""
+    eligible = [o for o in observations if feasible(o, settings)]
+    if not eligible:
+        raise ValueError("Expected improvement needs an eligible observation")
+    x = np.array([o["position"] for o in eligible])
+    y = np.array([float(o["metrics"]["secondary_metric"]) for o in eligible])
+    # Repeated confirmations alone cannot identify spatial length scales.
+    fitted = len(np.unique(x, axis=0)) >= 3
+    kernel = Matern(length_scale=settings.gp_length_scale,
+                    length_scale_bounds=settings.gp_length_scale_bounds, nu=2.5)
+    gp = GaussianProcessRegressor(kernel=kernel, alpha=settings.gp_noise ** 2,
+                                  normalize_y=True,
+                                  optimizer="fmin_l_bfgs_b" if fitted else None)
+    gp.fit(x, y)
+    return gp, fitted
 
-    def predict(mask, values):
-        gp = GaussianProcessRegressor(kernel=kernel, alpha=settings.gp_noise ** 2,
-                                      normalize_y=True, optimizer=None)
-        gp.fit(x[mask], np.asarray(values)[mask])
-        mu, std = gp.predict(candidates, return_std=True)
-        return mu, np.maximum(std, 1e-12)
 
-    good = np.array([feasible(o, settings) for o in observations])
-    if not good.any():
-        raise ValueError("Expected improvement needs a feasible incumbent")
-    m2 = np.array([float(o["metrics"]["secondary_metric"]) for o in observations])
-    mu, std = predict(good, m2)
-    improvement = m2[good].min() - mu - settings.ei_xi
+def expected_improvement(gp, candidates, best_m2, settings):
+    mu, std = gp.predict(np.asarray(candidates), return_std=True)
+    std = np.maximum(std, 1e-12)
+    improvement = best_m2 - mu - settings.ei_xi
     z = improvement / std
-    ei = improvement * norm.cdf(z) + std * norm.pdf(z)
-    g = np.array([geometry(o) for o in observations])
-    finite = np.isfinite(g)
-    gm, gs = predict(finite, g)
-    p_geometry = norm.cdf((settings.enter_m1 - gm) / gs)
-    valid = np.array([bool(o["metrics"]["valid"]) for o in observations])
-    if np.unique(valid).size == 2:
-        classifier = GaussianProcessClassifier(kernel=kernel, optimizer=None,
-                                                random_state=settings.seed)
-        classifier.fit(x, valid.astype(int))
-        p_valid = classifier.predict_proba(candidates)[:, 1]
-    else:
-        p_valid = np.full(len(candidates), (valid.sum() + 1) / (len(valid) + 2))
-    return np.maximum(ei, 0) * p_geometry * p_valid
+    return np.maximum(improvement * norm.cdf(z) + std * norm.pdf(z), 0)
 
 
 class Controller:
@@ -170,6 +169,8 @@ class Controller:
         with self.log_path.open("x"):
             pass
         self.history, self.current, self.acquisitions = [], None, 0
+        self.best = None
+        self.length_scales = np.asarray(settings.gp_length_scale, float)
         self.rng = np.random.default_rng(settings.seed)
         self.replay = isinstance(backend, Replay)
         self.record("start", calibration=calibration, settings=asdict(settings), replay=self.replay)
@@ -189,9 +190,7 @@ class Controller:
             raise RuntimeError("Readback is nonfinite or outside allowed bounds")
         return p
 
-    def acquire(self, target, plan, stage):
-        if self.acquisitions >= self.s.max_acquisitions:
-            raise RuntimeError("Acquisition budget exhausted")
+    def move(self, target, plan, stage):
         before = self.position()
         target = np.asarray(target, float)
         bounds = np.asarray(self.s.bounds)
@@ -205,6 +204,33 @@ class Controller:
         actual = self.position()
         if np.linalg.norm(actual - target) > self.s.readback_tolerance:
             raise RuntimeError("Motor readback does not match target; no recovery motion attempted")
+        return actual
+
+    def return_to_best(self, observation):
+        target = np.asarray(observation["position"], float)
+        if self.replay:
+            # Retrace measured waypoints, which are available in exact-grid replay.
+            waypoints = [o["position"] for o in reversed(self.history)
+                         if o["acquisition"] >= observation["acquisition"]]
+            for waypoint in waypoints:
+                self.move(waypoint, "Return along measured path to final position.", "transit")
+        else:
+            distance = np.linalg.norm(target - self.position())
+            while distance > self.s.max_step:
+                before = self.position()
+                waypoint = before + (target - before) * (self.s.max_step / distance)
+                actual = self.move(waypoint, "Bounded transit to final position.", "transit")
+                remaining = np.linalg.norm(target - actual)
+                if remaining >= distance:
+                    raise RuntimeError("Final transit made no progress")
+                distance = remaining
+            self.move(target, "Return to best observed position for confirmation.", "transit")
+
+    def acquire(self, target, plan, stage):
+        if self.acquisitions >= self.s.max_acquisitions:
+            raise RuntimeError("Acquisition budget exhausted")
+        target = np.asarray(target, float)
+        actual = self.move(target, plan, stage)
         self.acquisitions += 1
         image = self.backend.acquire_image()
         after = self.position()
@@ -233,7 +259,20 @@ class Controller:
             trend = (f"Previous M1={float(old['primary_metric']):.5g}, "
                      f"M2={float(old['secondary_metric']):.6g}; "
                      f"geometry {'improved' if geometry(obs) < geometry(self.current) else 'unchanged or worse'}.")
-        next_plan = "Compare against the incumbent, then follow the centroid correction, restore, confirm, or select a local BO trial."
+        eligible = feasible(obs, self.s)
+        if not m["valid"]:
+            rejection = "invalid fit"
+        elif not np.isfinite(float(m["primary_metric"])) or float(m["primary_metric"]) > self.s.bo_stage_entrance_m1:
+            rejection = "M1 exceeds BO threshold or is nonfinite"
+        elif not np.isfinite(float(m["secondary_metric"])):
+            rejection = "nonfinite M2"
+        else:
+            rejection = None
+        obs.update(bo_eligible=eligible, bo_rejection_reason=rejection)
+        if eligible and (self.best is None or float(m["secondary_metric"]) <
+                         float(self.best["metrics"]["secondary_metric"])):
+            self.best = obs
+        next_plan = "Update measured eligibility and best position; continue the current search stage or confirm the final position."
         self.record("observation", text=f"{description} {trend} Next: {next_plan}",
                     observation=obs, description=description, trend=trend, next_plan=next_plan,
                     remaining=self.s.max_acquisitions - self.acquisitions)
@@ -250,16 +289,21 @@ class Controller:
             lo = np.maximum(bounds[:, 0], p - self.s.bo_halfwidth)
             hi = np.minimum(bounds[:, 1], p + self.s.bo_halfwidth)
             pool = self.rng.uniform(lo, hi, (self.s.bo_candidates, 2))
-        delta = pool - p
+        delta = pool - self.position()
         allowed = (np.all((pool >= bounds[:, 0]) & (pool <= bounds[:, 1]), axis=1)
                    & (np.linalg.norm(delta, axis=1) <= self.s.max_step + 1e-9)
                    & (np.linalg.norm(delta, axis=1) >= self.s.min_step - 1e-9))
-        allowed &= np.all(np.abs(delta) <= np.asarray(self.s.bo_halfwidth) + 1e-9, axis=1)
+        allowed &= np.all(np.abs(pool - p) <= np.asarray(self.s.bo_halfwidth) + 1e-9, axis=1)
         pool = pool[allowed]
         if len(pool):
             seen = np.array([o["position"] for o in self.history])
             pool = pool[np.min(np.linalg.norm(pool[:, None] - seen[None, :], axis=2), axis=1)
                         >= self.s.min_step * 0.5]
+        rejected = [o["position"] for o in self.history
+                    if not eligible_geometry(o, self.s)]
+        if len(pool) and rejected:
+            offsets = (pool[:, None] - np.asarray(rejected)[None, :]) / self.length_scales
+            pool = pool[np.all(np.sum(offsets ** 2, axis=2) > 1., axis=1)]
         return pool
 
     def direction(self, observation):
@@ -311,7 +355,12 @@ class Controller:
             incumbent = self.acquire(self.position(), "Acquire baseline before choosing a move.", "baseline")
             stage = "coarse"
             failures, ceiling, confirmed = 0, self.s.max_step, 1
-            while self.acquisitions < self.s.max_acquisitions - self.s.confirmations - 1:
+            initial_samples = 0
+            while self.acquisitions < self.s.max_acquisitions - self.s.confirmations:
+                if stage == "coarse" and self.acquisitions >= self.s.max_acquisitions - self.s.confirmations - 1:
+                    break
+                if stage == "bo":
+                    incumbent = self.best
                 good = feasible(incumbent, self.s)
                 target_met = good and self.s.target_m2 is not None and float(
                     incumbent["metrics"]["secondary_metric"]) <= self.s.target_m2
@@ -324,24 +373,38 @@ class Controller:
                         confirmed = confirmed + 1 if feasible(incumbent, self.s) else 0
                         continue
                     stage = "bo"
-                if stage == "bo" and (not incumbent["metrics"]["valid"]
-                                      or geometry(incumbent) > self.s.exit_m1):
-                    stage, confirmed = "coarse", 0
-                    failures, ceiling = 0, self.s.max_step
                 if stage == "bo":
+                    incumbent = self.best
+                    gp, fitted = fit_objective(self.history, self.s)
+                    self.length_scales = np.asarray(gp.kernel_.length_scale)
+                    self.record("bo_model", length_scales=self.length_scales.tolist(),
+                                length_scales_fitted=fitted, training_count=len(gp.X_train_),
+                                training_acquisitions=[o["acquisition"] for o in self.history if feasible(o, self.s)],
+                                initial_samples=initial_samples,
+                                exclusion_acquisitions=[o["acquisition"] for o in self.history
+                                    if not eligible_geometry(o, self.s)])
                     pool = self.candidates(incumbent)
                     if not len(pool):
-                        reason = "local candidate set exhausted"
+                        reason = "no sampleable candidates after travel, spacing, and M1 exclusions"
+                        if initial_samples < self.s.bo_initial_samples:
+                            reason += "; random initialization incomplete"
                         break
-                    if not any(feasible(o, self.s) for o in self.history):
-                        stage = "coarse"
-                        continue
-                    scores = constrained_ei(self.history, pool, self.s)
-                    if scores.max() <= self.s.min_ei:
-                        reason = "constrained expected improvement below threshold"
-                        break
-                    trial = pool[np.argmax(scores)]
-                    plan = f"Local BO trial at {trial.tolist()}; constrained EI={scores.max():.5g}."
+                    if initial_samples < self.s.bo_initial_samples:
+                        trial = pool[self.rng.integers(len(pool))]
+                        plan = f"Random BO initialization {initial_samples + 1}/{self.s.bo_initial_samples} eligible locations."
+                        acquisition_stage = "bo_init"
+                    else:
+                        scores = expected_improvement(gp, pool, float(incumbent["metrics"]["secondary_metric"]), self.s)
+                        if scores.max() <= self.s.min_ei:
+                            reason = "expected improvement below threshold"
+                            break
+                        trial = pool[np.argmax(scores)]
+                        plan = f"Local BO trial at {trial.tolist()}; EI={scores.max():.5g}."
+                        acquisition_stage = "bo"
+                    obs = self.acquire(trial, plan, acquisition_stage)
+                    if acquisition_stage == "bo_init" and feasible(obs, self.s):
+                        initial_samples += 1
+                    continue
                 else:
                     correction = self.direction(incumbent)
                     if correction is None:
@@ -358,13 +421,10 @@ class Controller:
                         source = "Calibrated centroid correction" if failures % attempts == 0 else "Reverse correction probe"
                     trial = self.coarse_trial(incumbent, displacement)
                     plan = f"{source}, displacement={displacement.tolist()}; seek lower geometry error."
-                accepted = False
                 if trial is not None:
                     obs = self.acquire(trial, plan, stage)
-                    accepted = ((feasible(obs, self.s) and (not good or float(obs["metrics"]["secondary_metric"])
-                                < float(incumbent["metrics"]["secondary_metric"]) - self.s.m2_improvement))
-                                if stage == "bo" else
-                                (feasible(obs, self.s) or geometry(obs) < geometry(incumbent) - self.s.geometry_improvement))
+                    accepted = (feasible(obs, self.s) or
+                                geometry(obs) < geometry(incumbent) - self.s.geometry_improvement)
                     if accepted:
                         incumbent, confirmed = obs, 1
                         failures, ceiling = 0, self.s.max_step
@@ -379,6 +439,10 @@ class Controller:
                         if ceiling < self.s.min_step:
                             reason = "coarse vector search exhausted at minimum step"
                             break
+            if stage == "bo" and initial_samples < self.s.bo_initial_samples and reason == "budget exhausted":
+                reason = "random initialization budget exhausted"
+            incumbent = self.best if self.best is not None else incumbent
+            self.return_to_best(incumbent)
             # Final repeated acquisitions count toward the same budget.
             confirmations = []
             for _ in range(self.s.confirmations):

@@ -124,11 +124,11 @@ choices, and historical calibration diagnostics separate. Additional fields in
 older calibration files are ignored. Remove `max_center_shift` from older
 runtime configurations; fitting options belong in their `evaluator` object.
 
-The bundled runtime file overrides eta to `0.75`, sets `enter_m1 = 0.012` and
-`exit_m1 = 0.02`, and limits total acquisitions to 30. The tighter entry gate
+The bundled runtime file overrides eta to `0.75`, sets `bo_stage_entrance_m1 = 0.012`,
+and limits total acquisitions to 30. The tighter entry gate
 keeps the controller following the centroid correction longer before local BO.
-Their earlier simulator tuning used explicitly fixed semiaxes. Choose fitting
-options for the current images when assessing convergence and comparing M2.
+Choose fitting options for the current images when assessing convergence and
+comparing M2.
 The parameter table below lists script defaults; explicit runtime settings
 override them. New calibration runs emit initial settings for local tuning.
 
@@ -196,12 +196,13 @@ motor units and limits that must be replaced with appropriate local values:
   "bounds": [[-15, 15], [-15, 15]],
   "max_step": 5,
   "min_step": 0.5,
-  "enter_m1": 0.02,
-  "exit_m1": 0.03,
+  "bo_stage_entrance_m1": 0.02,
   "max_acquisitions": 40,
   "confirmations": 2,
   "bo_halfwidth": [5, 5],
+  "bo_initial_samples": 5,
   "gp_length_scale": [2.5, 2.5],
+  "gp_length_scale_bounds": [0.5, 10],
   "gp_noise": 0.05
 }
 ```
@@ -215,18 +216,19 @@ motor units and limits that must be replaced with appropriate local values:
 | `evaluator` | `{}` | Current-run evaluator options; omit semiaxes to fit them per image, or supply both to fix them |
 | `centroid_percentile` | 10 | Per-image background percentile for centroid weights |
 | `eta` | calibration value | Positive gain override for coarse correction |
-| `enter_m1`, `exit_m1` | 0.02, 0.03 | Fine-stage entry and coarse-stage recovery thresholds; entry < exit |
+| `bo_stage_entrance_m1` | 0.02 | Positive M1 threshold for BO entrance and observation eligibility |
 | `geometry_improvement` | 0.0001 | Minimum diagnostic geometry decrease for accepting a coarse trial |
-| `m2_improvement` | 0 | Minimum M2 decrease for accepting a feasible BO trial |
 | `max_acquisitions` | 40 | Total budget including baseline, recovery, and confirmation images |
 | `confirmations` | 2 | Consecutive feasible images for BO entry; number of final reimages |
 | `readback_tolerance` | 0.001 | Maximum Euclidean readback discrepancy in motor units |
-| `bo_halfwidth` | [5, 5] | Half-widths of a symmetric motor search box centered on the incumbent |
-| `gp_length_scale` | [2.5, 2.5] | Fixed Matérn-5/2 spatial length scales in motor units |
+| `bo_halfwidth` | [5, 5] | Half-widths of a symmetric motor search box centered on the best eligible observation |
+| `bo_initial_samples` | 5 | Eligible distinct random measurements before EI sampling; rejected attempts consume budget; 0 starts EI immediately |
+| `gp_length_scale` | [2.5, 2.5] | Initial Matérn-5/2 length scales and fallback before three distinct eligible locations, in motor units |
+| `gp_length_scale_bounds` | [0.5, 10] | Positive finite lower/upper bounds shared by both fitted spatial scales, in motor units |
 | `gp_noise` | 0.05 | Observation standard deviation in standardized GP target units; squared for GP alpha |
 | `bo_candidates` | 256 | Random candidate count per continuous BO iteration |
 | `ei_xi` | 0 | EI improvement margin in M2 units |
-| `min_ei` | 0 | Stop if maximum constrained EI is at most this value, in M2 units |
+| `min_ei` | 0 | Stop if maximum EI is at most this value, in M2 units |
 | `target_m2` | null | Optional absolute M2 target under the calibrated intensity conditions |
 | `seed` | 0 | Random seed for reproducible candidate generation |
 
@@ -260,34 +262,52 @@ run and leave recovery to the instrument procedure.
 
 ### Fine stage
 
-After consecutive valid images satisfy `M1 <= enter_m1`, minimize M2 using local
-Bayesian optimization. Optional fixed ellipse semiaxes are image geometry
-parameters configured for the current run, separate from the motor search bounds. At motor position `(5,5)`,
-half-widths `(D,D)` define a symmetric box `[5-D,5+D]` on both axes, clipped to
-permitted travel and the per-move displacement limit.
+After consecutive valid images satisfy `M1 <= bo_stage_entrance_m1`, minimize
+M2 using local Bayesian optimization. Initialize with `bo_initial_samples`
+eligible random measurements at distinct motor locations (default five).
+Rejected initialization attempts consume the total acquisition budget but do
+not count toward those five. Eligible coarse and confirmation images also train
+the GP; they do not replace the requested random measurements. An explicit M2
+target can end the search early, subject to final confirmation.
 
-The acquisition score is `EI(M2) * P(geometry <= enter_m1) * P(valid fit)`.
-Separate independent models approximate these factors:
+One Matérn-5/2 GP models M2. All valid observations with finite M1 at or below
+the threshold and finite M2 enter its training set, including worse M2 values
+and repeated confirmations. The acquisition function is expected improvement
+`EI(M2)` relative to the lowest eligible observed M2. Targets are standardized,
+and `gp_noise**2` is the observation variance in standardized units. After three
+distinct eligible locations, fit anisotropic length scales by maximizing marginal
+likelihood within `gp_length_scale_bounds`; before then, use `gp_length_scale`
+as a configured fallback. Each iteration rebuilds the GP from eligible history
+and logs its scales, whether they were fitted, and training acquisition IDs.
 
-- A GP regresses finite M2 values from feasible observations only.
-- A GP regresses finite diagnostic geometry scores, including invalid candidates.
-- A GP classifier learns valid/invalid fits. With a single observed class, a
-  smoothed empirical probability substitutes until both classes are available.
+Invalid fits and nonfinite or above-threshold M1 create spatial exclusions.
+For each rejected position `q`, exclude candidates `p` satisfying
+`((p_x-q_x)/ell_x)^2 + ((p_y-q_y)/ell_y)^2 <= 1`.
+This ellipse uses the latest GP scales, so its size changes on subsequent fits;
+before fitting is supported, it uses the configured fallback scales. Retain all
+rejection locations, including coarse observations, in the trajectory. Each
+observation records eligibility and a rejection reason, and each model event
+lists the acquisitions defining exclusions. Nonfinite M2 alone excludes an
+observation from training without creating an M1 neighborhood exclusion.
 
-No infinity enters GP training. A single feasible M2 observation can start BO;
-initial uncertainty then comes from the fixed GP prior. More observed variation
-makes its objective scale informative. Confirmatory images contribute observations,
-so choose a noise level consistent with repeatability. There is no multi-fidelity
-assumption: geometry is a constraint and M2 is the objective.
+Both initialization and EI sampling apply the same candidate filters. The
+symmetric box with half-widths `bo_halfwidth` moves with the best eligible
+observation. Clip it to global travel bounds and filter displacements from the
+actual readback to `[min_step, max_step]`. Exclude points within half `min_step`
+of any previously measured position, as well as the M1 neighborhoods above.
+Continuous candidates are uniform random proposals within the box; exact-grid
+replay uses available recorded locations. A depleted filtered candidate pool
+ends the search with an explicit reason, including incomplete initialization
+when applicable. A finite random pool can miss a small remaining sampleable area.
 
-Accept a fine-stage trial only if it is feasible and improves M2 by the configured
-amount, or restores feasibility to an incumbent in the hysteresis band. Rejected
-trials remain in the surrogate history; restore and reimage the incumbent. If the
-restored image becomes invalid or exceeds `exit_m1`, resume coarse alignment.
-Previously visited positions are excluded from new BO trials within half the
-minimum step; confirmation and recovery can repeat positions. The local box moves
-with the incumbent, and exploration stops on budget, exhausted candidates, or the
-EI threshold. A difficult image landscape can still trap this local search.
+Keep the physical position at each trial, even when M2 is worse or M1 fails.
+Track the best eligible observation separately. Reserve `confirmations` images
+from the total budget for final verification. If the initialization budget runs
+out first, report that reason and confirm the best eligible observation found.
+At termination, return to that best position using bounded transit moves without
+acquisitions, then acquire the final confirmations. Exact-grid replay retraces
+measured waypoints for this return. A difficult landscape or large exclusions
+can still limit this local search.
 
 ## Offline replay
 
