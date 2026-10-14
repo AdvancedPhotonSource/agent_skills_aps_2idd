@@ -126,7 +126,7 @@ def fit_response(positions, errors, gains, max_step, max_condition=100.0):
 
 
 def calibrate(manifest, reference, config, *, gains, max_step, coarse_threshold=0.02,
-              centroid_percentile=10.0, min_vector=0.5, min_coverage=0.5,
+              centroid_percentile=10.0, min_vector=0.5, min_coverage=0.3,
               max_condition=100.0):
     config.validate()
     parameters = [*reference, *gains, max_step, coarse_threshold, centroid_percentile,
@@ -212,7 +212,7 @@ def main():
     parser.add_argument("--coarse-threshold", type=float, default=0.02)
     parser.add_argument("--centroid-percentile", type=float, default=10.)
     parser.add_argument("--min-vector", type=float, default=0.5)
-    parser.add_argument("--min-coverage", type=float, default=0.5)
+    parser.add_argument("--min-coverage", type=float, default=0.3)
     parser.add_argument("--max-condition", type=float, default=100.)
     args = parser.parse_args()
     report_path = args.report or args.output.with_suffix(".report.json")

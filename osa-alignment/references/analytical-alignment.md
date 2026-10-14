@@ -178,7 +178,7 @@ Calibration options:
 | `--coarse-threshold` | 0.02 | Minimum diagnostic geometry score for response samples; maximum reference M1 |
 | `--centroid-percentile` | 10 | Per-image background percentile for centroid weights |
 | `--min-vector` | 0.5 | Minimum reference-corrected centroid error in pixels |
-| `--min-coverage` | 0.5 | Required support fraction on each candidate boundary for direction estimation |
+| `--min-coverage` | 0.3 | Required support fraction on each candidate boundary for direction estimation |
 | `--max-condition` | 100 | Maximum response-matrix condition number, including held-out fits |
 
 Review calibration diagnostics before use. The saved envelope describes sampled
@@ -212,7 +212,7 @@ motor units and limits that must be replaced with appropriate local values:
 | `units`, `bounds`, `max_step` | required | Adapter units, `[x_min,x_max]` and `[y_min,y_max]`, maximum Euclidean displacement for every move including recovery |
 | `min_step` | 0.5 | Smallest trial displacement in motor units |
 | `min_vector` | 0.5 | Minimum centroid error in pixels for using its direction |
-| `min_coverage` | 0.5 | Minimum support fraction on each candidate boundary for using the centroid direction |
+| `min_coverage` | 0.3 | Minimum support fraction on each candidate boundary for using the centroid direction |
 | `evaluator` | `{}` | Current-run evaluator options; omit semiaxes to fit them per image, or supply both to fix them |
 | `centroid_percentile` | 10 | Per-image background percentile for centroid weights |
 | `eta` | calibration value | Positive gain override for coarse correction |

@@ -26,7 +26,7 @@ class Settings:
     max_step: float
     min_step: float = 0.5
     min_vector: float = 0.5
-    min_coverage: float = 0.5
+    min_coverage: float = 0.3
     evaluator: dict = field(default_factory=dict)
     centroid_percentile: float = 10.0
     eta: float | None = None
