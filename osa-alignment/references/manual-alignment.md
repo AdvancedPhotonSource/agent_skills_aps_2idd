@@ -10,18 +10,54 @@ Use the shared [image criteria and examples](../SKILL.md#recognize-the-target-in
 and the tool integration requirements below.
 The evaluator can still supply metrics when the alignment controller is unavailable.
 
-## Tool integration placeholders
+## APS 2-ID-D adapter
 
-The entries below are interface placeholders, not callable tools or implemented
-hardware control. Bind them to the actual beamline tools before live alignment.
-With no bindings, use image evaluation or recorded-image replay. Mark any proposed
-motion as unexecuted; do not report simulated calls as measurements.
+Use [`APS2IDDAdapter`](../scripts/aps2idd_adapter.py) for manual OSA alignment at
+2-ID-D. Follow the [QueueServer setup instructions](analytical-alignment.md#aps-2-id-d-queueserver-adapter)
+to load the worker helpers, configure permissions, and replace the server URL
+placeholder in [`aps2idd.adapter.json`](../scripts/aps2idd.adapter.json).
+Start with an idle worker and reserve the instrument for alignment. The acquired
+TIFF paths must be accessible from the machine running the manual session.
 
-| Placeholder | Required information |
+From the skill directory, start an interactive Python session:
+
+```sh
+uv run --project scripts --locked --group beamline python
+```
+
+Initialize the adapter in that session:
+
+```python
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path("scripts").resolve()))
+from aps2idd_adapter import APS2IDDAdapter
+
+adapter = APS2IDDAdapter(json.loads(Path("scripts/aps2idd.adapter.json").read_text()))
+position_um = adapter.read_position()
+```
+
+| Operation | Manual-session use |
 | --- | --- |
-| `MOVE_OSA_XY` | Actual OSA motor identifiers, explicit absolute targets or relative displacements, units, permitted travel and maximum step, completion/settling status, and resulting position readbacks. |
-| `ADJUST_ZONE_PLATE_POSITION` | Actual zone-plate axes, targets, units, limits, completion status, and readbacks. Reserved for a beamline procedure that explicitly uses zone-plate motion to adjust relative alignment. |
-| `COLLECT_ILLUMINATION_IMAGE` | Acquisition settings, a fresh image and saved path or acquisition ID, acquisition time, and contemporaneous OSA/zone-plate readbacks. |
+| `adapter.read_position()` | Return actual `[x, y]` OSA coordinates in micrometers. |
+| `adapter.move_absolute([x_um, y_um])` | Command absolute coordinates and wait for successful completion and settling. Read the position again to verify the target. |
+| `adapter.acquire_image()` | Acquire a fresh X-eye image and return its unique saved TIFF path. Read position before and after acquisition to associate the image with a verified position. |
+| `adapter.close()` | Release the client when the manual session ends. |
+
+The adapter converts between micrometers and the motors' millimeters. For a
+relative trial, add the signed displacement to a fresh readback of the active
+axis and retain the other axis's readback as its target. The manual workflow owns
+search bounds, maximum step, readback tolerance, budgets, and trajectory logging;
+calling the adapter directly does not apply the alignment controller's checks.
+Configure exposure and gain consistently through the beamline's camera controls.
+
+If the adapter raises an error or times out, resolve the QueueServer and motor
+state before another move or acquisition; remote execution may still be active.
+With the server unavailable, use supplied images or recorded-image replay and
+record proposed motions as unexecuted. Other facilities must supply an adapter
+implementing the [same interface](analytical-alignment.md#beamline-adapter-placeholder).
 
 OSA and zone-plate motors are distinct. Default to OSA transverse x/y motion with
 the optics fixed. If a local procedure instead moves the zone plate, establish
@@ -33,7 +69,7 @@ other optics settings fixed during the transverse search.
 
 Use available session and beamline information to establish the controlled device,
 axis units, current readbacks, allowed x/y search range, maximum per-move displacement,
-initial trial step, and smallest useful step. Obtain missing motion constraints
+readback tolerance, initial trial step, and smallest useful step. Obtain missing motion constraints
 before moving. Use a finite move/time budget from the session or beamline procedure;
 if none is given, state a default of at most 20 trial moves for this pass.
 
@@ -93,10 +129,15 @@ the target and only small refinements remain.
    no established response, make a small permitted trial on one axis while holding
    the other fixed. State the predicted improvement as a hypothesis. Image-side
    brightness alone does not determine the sign of a motor correction.
-3. **Execute and verify.** Check the target against the permitted range and step
-   limit, move the selected motor, wait for completion/settling, and verify the
-   readback. Then collect a fresh image. Never pair a pre-move image with a post-move
-   position. Record the full observation, comparison, and plan before continuing.
+3. **Execute and verify.** Use `adapter.read_position()` to check the absolute
+   target against the permitted range and maximum displacement from the current
+   position. Call `adapter.move_absolute(target_um)`, then `adapter.read_position()`
+   and verify its Euclidean discrepancy from the target is within the established
+   tolerance. Call `adapter.acquire_image()` and read the position again; require
+   the before/after acquisition discrepancy to remain within that tolerance.
+   Apply the same acquisition checks to baseline, repeat, and confirmation images.
+   Record the image path, acquisition time, full observation, comparison, and plan
+   before continuing. Resolve an unexpected readback before taking further action.
 4. **Follow improvement.** Continue on the active axis in a direction while it gives credible gains
    in ring balance and hole cleanliness. If one improves while the other worsens,
    record the tradeoff; do not promote the result to “good” until both are acceptable.

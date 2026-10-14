@@ -168,10 +168,11 @@ uv run --project scripts --locked python scripts/align_osa.py \
   --log trajectory.jsonl --output result.json
 ```
 
-Live operation requires a facility implementation of the
-[adapter interface](references/analytical-alignment.md#beamline-adapter-placeholder);
-motion and acquisition remain placeholders until it is supplied. For recorded
-images, use [offline replay](references/analytical-alignment.md#offline-replay).
+For APS 2-ID-D, use the [QueueServer adapter](references/analytical-alignment.md#aps-2-id-d-queueserver-adapter)
+with the server URL in `scripts/aps2idd.adapter.json` and the documented worker
+helpers loaded. Other facilities can implement the
+[adapter interface](references/analytical-alignment.md#beamline-adapter-placeholder).
+For recorded images, use [offline replay](references/analytical-alignment.md#offline-replay).
 
 Add `--webui` to show a read-only live dashboard with the run settings, latest
 image, search trajectory, and M1/M2 histories. The script prints its local URL

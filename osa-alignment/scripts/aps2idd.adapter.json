@@ -1,0 +1,11 @@
+{
+  "url": "REPLACE_WITH_QUEUESERVER_URL",
+  "user": "osa-alignment",
+  "user_group": "primary",
+  "request_timeout": 5.0,
+  "operation_timeout": 60.0,
+  "motion_timeout": 30.0,
+  "acquisition_timeout": 6.0,
+  "settle_time": 0.2,
+  "poll_interval": 0.2
+}

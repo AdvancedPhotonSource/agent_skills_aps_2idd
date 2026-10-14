@@ -13,3 +13,4 @@ dependencies = [
 
 [dependency-groups]
 analysis = ["matplotlib>=3.9,<4", "pytest>=8,<10"]
+beamline = ["bluesky-queueserver-api>=0.0.12,<0.1"]

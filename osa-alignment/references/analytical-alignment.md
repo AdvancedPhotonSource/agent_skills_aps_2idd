@@ -368,7 +368,7 @@ page may show its last received state if the run finishes between refreshes.
 
 ## Beamline adapter placeholder
 
-Live use requires a facility implementation. No instrument control is bundled.
+Live use requires a facility adapter, such as the APS 2-ID-D implementation below.
 Create an importable module whose factory receives the adapter configuration and
 returns an object with this contract:
 
@@ -400,6 +400,70 @@ owns acquisition settings, freshness, motion settling, hardware interlocks, and
 finite motion/acquisition timeouts. Keep longitudinal position and zone-plate
 settings fixed. Binding this interface to zone-plate motion requires an explicit
 local procedure and calibration for those axes.
+
+### APS 2-ID-D QueueServer adapter
+
+[`APS2IDDAdapter`](../scripts/aps2idd_adapter.py) implements this interface using
+the 2-ID-D QueueServer and its existing `acquire_xeye_image` function. Positions
+are absolute motor readbacks in micrometers; the adapter converts to/from the
+motors' millimeters. Image files must be available at the same absolute path on
+the worker and the machine running alignment.
+
+On the QueueServer host, put [`aps2idd_qserver.py`](../scripts/aps2idd_qserver.py)
+on the worker's Python import path and add these imports to its startup namespace:
+
+```python
+from aps2idd_qserver import read_osa_position, move_osa_absolute
+from s2idd_uprobe.qserver.xeye_osa import acquire_xeye_image
+```
+
+Load the helpers after beamline startup initializes the `osa` and `savedata`
+devices. Allow `move_osa_absolute` in the user's QueueServer plan permissions and
+`read_osa_position` / `acquire_xeye_image` in function permissions, then reload the
+worker environment and its allowed lists using the beamline's normal procedure.
+The move plan validates both motor targets, waits with a finite motor timeout,
+and settles before completing. Existing motor limits and beamline interlocks
+remain responsible for hardware protection.
+
+Install the optional client dependency and edit
+[`aps2idd.adapter.json`](../scripts/aps2idd.adapter.json):
+
+```sh
+uv sync --project scripts --locked --group beamline
+```
+
+Replace `url` with the actual HTTP gateway URL (`http://HOST:PORT`) or direct
+QueueServer control address (`tcp://HOST:PORT`). The placeholder fails validation
+before any connection. `user` and `user_group` apply to direct QueueServer requests;
+HTTP uses the gateway's authenticated identity. For HTTP API-key authentication,
+set `api_key_env` to the name of an environment variable containing the key.
+
+`request_timeout` bounds individual requests, `motion_timeout` bounds motor
+statuses, and `acquisition_timeout` is passed to the camera helper.
+`operation_timeout` sets the polling deadline and must exceed motion plus settling
+and the acquisition timeout; in-flight requests have separate request timeouts.
+`settle_time` and `poll_interval` are in seconds, as are all timeouts.
+
+```sh
+uv run --project scripts --locked --group beamline python scripts/align_osa.py \
+  --calibration calibration.json --config alignment.json \
+  --adapter aps2idd_adapter:create_adapter --adapter-config scripts/aps2idd.adapter.json \
+  --log trajectory.jsonl --output result.json
+```
+
+Use bounds in the actual absolute coordinate frame and a calibration valid for
+the current optics, camera orientation, and acquisition settings. Configure the
+camera exposure/gain consistently before alignment; the existing helper fetches
+JPEG snapshots and stores them as TIFF without setting those camera parameters.
+
+The adapter uses foreground functions and executes each move immediately with
+`item_execute`, checking its specific item UID in plan history for successful
+completion. This follows the [QueueServer execution API](https://blueskyproject.io/bluesky-queueserver/re_manager_api.html).
+Reserve the instrument for alignment and start with an idle worker. A rejected
+request, failed/stopped/aborted move, paused plan, or expired task raises an error.
+Timeouts and connection loss leave remote execution potentially unresolved;
+inspect QueueServer and the motor state before starting another run. Each image
+gets a unique filename so repeated confirmations retain separate files.
 
 ## Logs and outcomes
 

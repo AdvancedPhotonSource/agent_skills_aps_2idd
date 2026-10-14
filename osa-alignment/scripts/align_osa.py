@@ -491,7 +491,7 @@ def main():
     parser.add_argument("--config", type=Path, required=True, help="JSON Settings object")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--manifest", type=Path, help="Replay recorded positions without interpolation")
-    source.add_argument("--adapter", help="Beamline adapter MODULE:FACTORY; no hardware binding is supplied")
+    source.add_argument("--adapter", help="Beamline adapter MODULE:FACTORY, e.g. aps2idd_adapter:create_adapter")
     parser.add_argument("--adapter-config", type=Path)
     parser.add_argument("--start", type=float, nargs=2, help="Replay starting position")
     parser.add_argument("--log", type=Path, required=True, help="New JSONL trajectory file")
