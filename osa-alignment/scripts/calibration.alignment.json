@@ -25,6 +25,6 @@
     ]
   },
   "eta": 0.75,
-  "max_acquisitions": 30,
+  "max_acquisitions": 40,
   "bo_stage_entrance_m1": 0.012
 }
