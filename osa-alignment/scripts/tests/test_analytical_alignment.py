@@ -529,6 +529,47 @@ def test_final_return_uses_bounded_transits_without_extra_images(tmp_path, repla
     assert all(np.linalg.norm(np.array(e['target']) - e['previous_readback']) <= 3 for e in transits)
 
 
+def test_final_return_uses_lowest_m1_when_bo_never_started(tmp_path):
+    backend = SyntheticBackend([10, 0])
+    def measured(p, cal):
+        obs = observation(p)
+        # The trial improves M1 but is rejected by the coarse geometry score.
+        obs['metrics']['primary_metric'] = .03 if p[0] == 5 else .04
+        obs['metrics']['geometry_score'] = .2 if p[0] == 5 else .1
+        obs['metrics']['secondary_metric'] = 20. if p[0] == 5 else 10.
+        return obs
+    c = Controller(calibration(), settings(max_acquisitions=5), backend, tmp_path / 'log', measured)
+    result = c.run()
+    assert [o['stage'] for o in c.history] == ['baseline', 'coarse', 'restore', 'final', 'final']
+    assert result['status'] == 'unconfirmed'
+    assert result['final_readback'] == [5, 0]
+    assert result['best_observed']['position'] == [5, 0]
+    assert result['best_observed']['metrics']['primary_metric'] == .03
+    assert backend.acquisitions == 5
+
+
+@pytest.mark.parametrize('replay', [False, True])
+def test_final_return_uses_lowest_m2_after_bo_started(tmp_path, replay):
+    backend = (Replay(dict(units='um', samples=[dict(position=[x, 0], image=[x, 0])
+                                               for x in [0, 3, 6]]), [0, 0])
+               if replay else SyntheticBackend([0, 0]))
+    if not replay:
+        backend.candidate_positions = np.array([[3, 0], [6, 0]])
+    def measured(p, cal):
+        obs = observation(p)
+        obs['metrics']['primary_metric'] = {0: .01, 3: .015, 6: .005}[p[0]]
+        obs['metrics']['secondary_metric'] = {0: 10., 3: 5., 6: 20.}[p[0]]
+        return obs
+    c = Controller(calibration(), settings(target_m2=None, max_step=3, bo_halfwidth=[8, 8],
+                   bo_initial_samples=2, max_acquisitions=6), backend, tmp_path / 'log', measured)
+    result = c.run()
+    assert result['status'] == 'best_found'
+    assert result['acquisitions'] == 6
+    assert result['final_readback'] == [3, 0]
+    assert result['best_observed']['position'] == [3, 0]
+    assert [o['position'] for o in c.history] == [[0, 0], [0, 0], [3, 0], [6, 0], [3, 0], [3, 0]]
+
+
 @pytest.mark.parametrize('options', [dict(bo_initial_samples=-1), dict(bo_initial_samples=1.5),
     dict(gp_length_scale_bounds=[0, 10]), dict(gp_length_scale_bounds=[3, 2]),
     dict(gp_length_scale_bounds=[.1, float('inf')]), dict(gp_length_scale=[.1, 2]),

@@ -232,6 +232,13 @@ class Controller:
                 distance = remaining
             self.move(target, "Return to best observed position for confirmation.", "transit")
 
+    def best_observed(self, bo_started):
+        metric = "secondary_metric" if bo_started else "primary_metric"
+        observations = (o for o in self.history
+                        if (feasible(o, self.s) if bo_started
+                            else np.isfinite(float(o["metrics"][metric]))))
+        return min(observations, key=lambda o: float(o["metrics"][metric]), default=None)
+
     def acquire(self, target, plan, stage):
         if self.acquisitions >= self.s.max_acquisitions:
             raise RuntimeError("Acquisition budget exhausted")
@@ -357,6 +364,7 @@ class Controller:
 
     def run(self):
         incumbent, reason, status = None, "budget exhausted", "best_found"
+        bo_started = False
         try:
             incumbent = self.acquire(self.position(), "Acquire baseline before choosing a move.", "baseline")
             stage = "coarse"
@@ -379,6 +387,7 @@ class Controller:
                         confirmed = confirmed + 1 if feasible(incumbent, self.s) else 0
                         continue
                     stage = "bo"
+                    bo_started = True
                 if stage == "bo":
                     incumbent = self.best
                     gp, fitted = fit_objective(self.history, self.s)
@@ -447,7 +456,7 @@ class Controller:
                             break
             if stage == "bo" and initial_samples < self.s.bo_initial_samples and reason == "budget exhausted":
                 reason = "random initialization budget exhausted"
-            incumbent = self.best if self.best is not None else incumbent
+            incumbent = self.best_observed(bo_started) or incumbent
             self.return_to_best(incumbent)
             # Final repeated acquisitions count toward the same budget.
             confirmations = []
@@ -468,10 +477,7 @@ class Controller:
         except Exception as exc:
             status, reason = "blocked", f"{type(exc).__name__}: {exc}"
             self.record("fault", text=reason)
-        best = min((o for o in self.history if feasible(o, self.s)),
-                   key=lambda o: float(o["metrics"]["secondary_metric"]), default=None)
-        if best is None:
-            best = min(self.history, key=geometry, default=None)
+        best = self.best_observed(bo_started)
         try:
             final_position = self.position().tolist()
         except Exception:
