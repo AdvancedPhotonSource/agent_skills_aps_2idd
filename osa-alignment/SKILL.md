@@ -79,9 +79,10 @@ uv run --project scripts --locked python scripts/evaluate_alignment.py IMAGE --o
 
 Supply both `--inner-axes A B` and `--outer-axes A B` to fix semiaxes in pixels;
 otherwise they are fitted. See [metric details](references/analytical-alignment.md#quantitative-evaluation)
-for normalization, fit diagnostics, and options.
+for normalization, fit diagnostics, and options. 
+**Supply the best guess of the semiaxes whenever possible as they are important for accurate fitting**.
 
-#### Definitions and interpretation of M1 and M2
+#### Definitions and interpretation of the M1 and M2 metrics
 
 **M1 (`primary_metric`) measures boundary geometry and completeness.** The inner
 and outer ellipses share a center and orientation. For a valid fit,
@@ -115,14 +116,6 @@ and hole area; it has no universal acceptable cutoff. Fixed semiaxes and consist
 acquisition settings make comparisons meaningful. A low sum can still conceal
 a localized bright spot.
 
-**Interpret M1 first, then M2.** The controller requires a valid fit and
-`M1 <= bo_stage_entrance_m1` (script default 0.02; bundled settings 0.012) before optimizing M2 within that constraint.
-A lower M2 cannot compensate for an incomplete or badly fitted donut. Qualify
-thresholds and meaningful differences using a good reference and repeat images.
-Invalid fits return both metrics as `"inf"` in JSON; this means the measurements
-are unusable, not that the physical intensity is infinite. A finite diagnostic
-`geometry_score` may still be available, but it does not establish fit validity.
-
 ### Calibrate
 
 [scripts/calibrate_alignment.py](scripts/calibrate_alignment.py) uses recorded
@@ -143,9 +136,11 @@ manifest's motor units. See [calibration inputs and options](references/analytic
 
 ### Run alignment
 
-[scripts/align_osa.py](scripts/align_osa.py) performs calibrated 2D centroid corrections,
-then random initialization and local Bayesian optimization of M2 once M1 meets
-its threshold. Eligible observations train one objective GP; high-M1 images
+[scripts/align_osa.py](scripts/align_osa.py) aligns the OSA in two stages: 
+in stage 1, it performs stepped search using
+search directions derived from the calibrated offset vector from the fitted
+donut center to the centroid of the image until M1 meets its threshold; in stage 2, it performs random 
+initialization and local Bayesian optimization of M2. Eligible observations train one objective GP; high-M1 images
 exclude neighborhoods from further sampling. The final position is the best
 eligible observation, verified by repeated images.
 The calibration file is required. Eta defaults to its calibrated value and can
@@ -159,7 +154,7 @@ coarse restores, and final confirmations. Configure image fitting for the curren
 runtime `evaluator` object and `centroid_percentile` (default 10). Semiaxes are
 fitted per image unless both `inner_axes` and `outer_axes` are explicitly supplied
 in `evaluator`. Image dimensions and absolute ellipse position may differ from
-the calibration images.
+the calibration images. Supplying the semiaxes is strongly recommended for accurate fitting.
 
 ```sh
 uv run --project scripts --locked python scripts/align_osa.py \

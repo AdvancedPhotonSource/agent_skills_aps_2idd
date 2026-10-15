@@ -37,12 +37,12 @@ image as well as the residual.
 The script detects Canny edges, distinguishes inward and outward intensity
 transitions, and fits the concentric ellipses. Lower scores are better:
 
-- `primary_metric`: mean inner/outer circumference-to-edge RMS distance divided
+- `primary_metric` (M1): mean inner/outer circumference-to-edge RMS distance divided
   by outer equal-area radius (√(AB) for an ellipse), plus a penalty for unsupported
   angular coverage. Both boundaries receive equal weight, with 360 true polar-angle
   samples per boundary and a default coverage weight λ = 0.5. This measures
   geometry and completeness.
-- `secondary_metric`: background-subtracted intensity summed inside the inner
+- `secondary_metric` (M2): background-subtracted intensity summed inside the inner
   boundary, optionally divided by `--intensity-normalizer`. Use `--background`
   for a known scalar detector background. The input intensity scale is preserved;
   RGB images use luminance weights. Display-scaled images do not give photon counts.
@@ -356,7 +356,8 @@ dependencies with no external browser libraries. Omit `--webui` to run without
 the server. Use `--webui-port 0` for an automatically selected port.
 
 For agent-launched runs, enable the flag, leave the command running, and give the
-user the printed URL. For an agent on a remote host, forward the selected port:
+user the printed URL. If possible, open the URL in a browser.
+For an agent on a remote host, forward the selected port:
 `ssh -L 8765:127.0.0.1:8765 USER@HOST`, then open `http://127.0.0.1:8765/` locally.
 The script does not launch a browser or wait for user interaction.
 
@@ -397,9 +398,7 @@ Launch with `--adapter beamline_adapter:create_adapter --adapter-config beamline
 in place of `--manifest` and `--start`. The controller reads its actual starting
 position and verifies readbacks before and after each acquisition. The adapter
 owns acquisition settings, freshness, motion settling, hardware interlocks, and
-finite motion/acquisition timeouts. Keep longitudinal position and zone-plate
-settings fixed. Binding this interface to zone-plate motion requires an explicit
-local procedure and calibration for those axes.
+finite motion/acquisition timeouts. 
 
 ### APS 2-ID-D QueueServer adapter
 
