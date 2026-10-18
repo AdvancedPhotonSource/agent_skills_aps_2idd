@@ -616,3 +616,71 @@ def test_final_transit_readback_fault_stops_without_confirmation(tmp_path):
     assert result['acquisitions'] == backend.acquisitions == 4
     assert len(backend.moves) == 3
     assert not any(o['stage'] == 'final' for o in c.history)
+
+
+def ring_image():
+    y, x = np.indices((100, 100))
+    r = np.hypot(x - 50, y - 50)
+    return np.where((r >= 12) & (r <= 30), 100., 0.)
+
+
+
+def test_nonconvergent_optimizer_returns_finite_m1_from_returned_geometry(monkeypatch):
+    import evaluate_alignment as module
+    original = module.least_squares
+    fits = []
+
+    def limited(*args, **kwargs):
+        kwargs['max_nfev'] = 1
+        fit = original(*args, **kwargs)
+        fits.append(fit)
+        return fit
+
+    monkeypatch.setattr(module, 'least_squares', limited)
+    m = module.evaluate(ring_image(), Config(inner_axes=(12, 12), outer_axes=(30, 30)))
+    assert not m['valid']
+    assert 'Optimizer did not converge' in m['reasons']
+    assert np.isfinite(m['primary_metric'])
+    expected = ((m['inner_rms_px'] + m['outer_rms_px']) / (2 * 30)
+                + .5 * (1 - (m['inner_coverage'] + m['outer_coverage']) / 2))
+    assert m['primary_metric'] == pytest.approx(expected)
+    assert m['primary_metric'] == m['geometry_score']
+    assert any(np.allclose(fit.x[:2], [m['fit']['center_x'], m['fit']['center_y']]) for fit in fits)
+    assert np.isinf(m['secondary_metric'])
+
+
+
+@pytest.mark.parametrize('fixed', [False, True])
+@pytest.mark.parametrize('image_kind', ['blank', 'no_seeds', 'no_edges', 'partial_ring'])
+def test_failed_boundary_fits_always_produce_finite_m1(monkeypatch, fixed, image_kind):
+    import evaluate_alignment as module
+    image = ring_image()
+    if image_kind == 'blank':
+        image[:] = 0
+    elif image_kind == 'no_seeds':
+        monkeypatch.setattr(module, '_seeds', lambda *args: [])
+    elif image_kind == 'no_edges':
+        monkeypatch.setattr(module, 'canny', lambda image, **kwargs: np.zeros_like(image, dtype=bool))
+    else:
+        image[:50] = 0
+    config = Config(inner_axes=(12, 12), outer_axes=(30, 30)) if fixed else Config()
+    m = module.evaluate(image, config)
+    assert np.isfinite(m['primary_metric'])
+    assert m['primary_metric'] == m['geometry_score']
+    assert m['fit'] is not None
+    if image_kind in ('blank', 'no_edges', 'partial_ring'):
+        assert not m['valid']
+        assert m['reasons']
+        assert np.isinf(m['secondary_metric'])
+    if image_kind in ('blank', 'no_edges'):
+        assert m['primary_metric'] > .5
+
+
+
+@pytest.mark.parametrize('fixed', [False, True])
+def test_smallest_supported_image_still_has_finite_m1(fixed):
+    from evaluate_alignment import evaluate
+    config = Config(inner_axes=(.1, .1), outer_axes=(100, 100)) if fixed else Config()
+    m = evaluate(np.zeros((16, 16)), config)
+    assert np.isfinite(m['primary_metric'])
+    assert not m['valid']

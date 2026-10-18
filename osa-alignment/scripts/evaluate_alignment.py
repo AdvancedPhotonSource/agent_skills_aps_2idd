@@ -132,12 +132,12 @@ def boundary_points(fit: dict, boundary: str, angles: np.ndarray):
 
 
 def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
-    """Return scores plus fit diagnostics. Invalid fits have infinite M1 and M2.
+    """Return scores plus fit diagnostics. M1 stays finite even when fit validation fails.
 
     M1 = mean boundary RMS distance / outer equal-area radius + coverage_weight *
          mean unsupported angular fraction. M2 = background-subtracted hole sum
          / intensity_normalizer. Ellipses share a center and orientation. Coverage uses 360 true polar angles, one degree apart.
-    JSON serialization encodes nonfinite scores as the string "inf".
+    Failed fits retain the best candidate geometry for M1; M2 is infinite when invalid.
     """
     config = config or Config()
     config.validate()
@@ -145,13 +145,12 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
     height, width = image.shape
     result = dict(valid=False, reasons=[], config=asdict(config),
                   image_shape=list(image.shape), fit=None,
-                  primary_metric=float("inf"), secondary_metric=float("inf"),
+                  secondary_metric=float("inf"),
                   geometry_score=float("inf"), hole_integral=None)
     floor, ceiling = np.percentile(image, [10, 99.5])
-    if ceiling <= floor:
-        result["reasons"] = ["No usable intensity contrast"]
-        return result
-    normalized = np.clip((image - floor) / (ceiling - floor), 0, 1)
+    base_reasons = ["No usable intensity contrast"] if ceiling <= floor else []
+    normalized = (np.zeros_like(image) if ceiling <= floor else
+                  np.clip((image - floor) / (ceiling - floor), 0, 1))
     edges = canny(normalized, sigma=config.sigma,
                   low_threshold=config.edge_low, high_threshold=config.edge_high)
     smooth = ndi.gaussian_filter(normalized, config.sigma)
@@ -175,9 +174,9 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
             alignment = (nx * gx + ny * gy) / np.maximum(
                 np.hypot(nx, ny) * np.hypot(gx, gy), 1e-12)
             mask = edges & (sign * alignment > 0.5)
-            if not mask.any():
-                break
-            maps.append(ndi.distance_transform_edt(~mask))
+            # No supported edges still supplies a finite residual to the optimizer.
+            maps.append(ndi.distance_transform_edt(~mask) if mask.any() else
+                        np.full(image.shape, np.hypot(height, width)))
         return maps
 
     candidates = []
@@ -201,10 +200,12 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
     seeds = _seeds(normalized, config)
     if moment_seed is not None:
         seeds.append(moment_seed)
+    if not seeds:
+        radius = (float(np.sqrt(np.prod(config.outer_axes)))
+                  if config.outer_axes is not None else min(image.shape) * 0.25)
+        seeds = [((width - 1) / 2, (height - 1) / 2, radius)]
     for cx, cy, radius in seeds:
         maps = distance_maps(cx, cy)
-        if len(maps) != 2:
-            continue
 
         def unpack(parameters):
             x, y = map(float, parameters[:2])
@@ -234,9 +235,7 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
             lower += [-np.pi]
             upper += [2 * np.pi]
         else:
-            trial_radii = np.arange(max(3, radius * 0.12), radius * 0.65, 1)
-            if not trial_radii.size:
-                continue
+            trial_radii = np.arange(max(1, radius * 0.12), max(2, radius * 0.65), 1)
             costs = [np.mean(ndi.map_coordinates(
                 maps[0], [cy + r * sin, cx + r * cos], order=1,
                 mode="constant", cval=radius)) for r in trial_radii]
@@ -252,13 +251,9 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
         # Update edge-normal classification at the fitted center and refine.
         # Final metrics must depend on the final geometry, not on its seed.
         maps = distance_maps(*fit.x[:2], unpack(fit.x))
-        if len(maps) != 2:
-            continue
         fit = least_squares(residuals, fit.x, bounds=(lower, upper),
                             diff_step=1e-3, max_nfev=150)
         maps = distance_maps(*fit.x[:2], unpack(fit.x))
-        if len(maps) != 2:
-            continue
         geometry = unpack(fit.x)
         x, y = geometry["center_x"], geometry["center_y"]
         a, b = geometry["outer_axes"]
@@ -274,7 +269,7 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
         rms = np.sqrt(np.mean(distances ** 2, axis=1))
         score = float(rms.mean() / outer + config.coverage_weight * (1 - coverage.mean()))
         gaps = [_largest_gap(d <= tolerance) for d in distances]
-        reasons = []
+        reasons = list(base_reasons)
         if not fit.success:
             reasons.append("Optimizer did not converge")
         if min(x - extent_x, y - extent_y, width - 1 - x - extent_x, height - 1 - y - extent_y) < 0:
@@ -291,11 +286,9 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
             inner_max_gap_degrees=gaps[0], outer_max_gap_degrees=gaps[1],
             edge_tolerance_px=tolerance,
         ))
-    if not candidates:
-        result["reasons"] = ["No usable pair of inner and outer boundary edges"]
-        return result
     # Prefer an adequately supported model over a spurious low-residual arc.
     result.update(min(candidates, key=lambda c: (not c["valid"], c["geometry_score"])))
+    result["primary_metric"] = result["geometry_score"]
     fit = result["fit"]
     dx, dy = xx - fit["center_x"], yy - fit["center_y"]
     theta = np.deg2rad(fit["angle_degrees"])
@@ -319,7 +312,6 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
         result["valid"] = False
         result["reasons"].append("Annulus is not brighter than the hole above background")
     if result["valid"]:
-        result["primary_metric"] = result["geometry_score"]
         result["secondary_metric"] = integral / config.intensity_normalizer
     return result
 

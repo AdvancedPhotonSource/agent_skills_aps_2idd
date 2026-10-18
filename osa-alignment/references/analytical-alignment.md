@@ -47,12 +47,15 @@ transitions, and fits the concentric ellipses. Lower scores are better:
   for a known scalar detector background. The input intensity scale is preserved;
   RGB images use luminance weights. Display-scaled images do not give photon counts.
 
-An invalid fit sets both metrics to infinity (encoded as `"inf"` in JSON) and
-provides failure reasons. Candidate boundaries and `geometry_score` may remain for
-diagnosis. A valid fit establishes measurable geometry, not successful alignment.
-Review boundary RMS errors, angular coverage, hole mean, and hole area alongside
-the scores. The support thresholds are adjustable prototype defaults; use
-`--help` for options. Texture, saturation, and soft edges can bias the fit.
+M1 is always finite for an accepted image input, including failed optimizer
+convergence or fit validation. It uses residuals and unsupported angular coverage
+from the best available optimizer geometry. If no seed or boundary edge is found,
+a centered ellipse seed and finite image-diagonal distances for absent edges keep
+the optimization and score defined. The optimizer's returned parameters are used
+even when it reaches its evaluation limit. `valid` and `reasons` still report
+fit quality, and invalid fits retain infinite M2 (encoded as `"inf"` in JSON).
+A finite M1 does not imply a valid fit or successful alignment. Review the image,
+RMS errors, coverage, hole mean, and hole area alongside the scores.
 
 The controller first establishes feasible geometry using M1, then minimizes M2
 within the configured M1 constraint.

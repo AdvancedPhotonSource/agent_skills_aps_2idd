@@ -71,7 +71,8 @@ uv sync --project scripts --locked
 
 [scripts/evaluate_alignment.py](scripts/evaluate_alignment.py) fits concentric
 ellipses and returns M1 (boundary error and completeness) and M2 (integrated hole
-intensity). Lower values are better; invalid fits return infinite metrics.
+intensity). Lower values are better. M1 stays finite on failed fits using the best available
+optimizer geometry; M2 remains infinite when the fit is invalid.
 
 ```sh
 uv run --project scripts --locked python scripts/evaluate_alignment.py IMAGE --output metrics.json
