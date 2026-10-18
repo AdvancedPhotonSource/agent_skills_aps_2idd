@@ -693,3 +693,63 @@ def test_initial_moves_still_enforce_global_bounds_and_readbacks(tmp_path, stage
         c.acquire([12, 0], 'Direct initialization', stage)
     assert len(faulty.moves) == 1
     assert faulty.acquisitions == 0
+
+
+@pytest.mark.parametrize('axis', [0, 1])
+@pytest.mark.parametrize('side', [-1, 1])
+@pytest.mark.parametrize('fraction', [0., .5, 1.])
+def test_readback_bounds_allow_configured_tolerance(tmp_path, axis, side, fraction):
+    point = np.zeros(2)
+    point[axis] = side * (15 + fraction * .01)
+    c = Controller(settings(readback_tolerance=.01), SyntheticBackend(point), tmp_path / 'log')
+    np.testing.assert_array_equal(c.position(), point)
+
+
+@pytest.mark.parametrize('point', [[15.011, 0], [-15.011, 0], [0, 15.011], [0, -15.011],
+                                   [float('nan'), 0], [0, float('inf')], [0], [0, 0, 0]])
+def test_invalid_readbacks_still_stop_before_motion(tmp_path, point):
+    backend = SyntheticBackend(point)
+    c = Controller(settings(readback_tolerance=.01), backend, tmp_path / 'log')
+    with pytest.raises(RuntimeError, match='Readback'):
+        c.position()
+    assert backend.moves == []
+
+
+def test_commanded_targets_stay_inside_exact_bounds_with_readback_tolerance(tmp_path):
+    backend = SyntheticBackend([15, 0])
+    c = Controller(settings(readback_tolerance=.01), backend, tmp_path / 'log', observation)
+    with pytest.raises(RuntimeError, match='bounds'):
+        c.acquire([15.005, 0], 'Outside exact command bounds', 'stage1_init')
+    assert backend.moves == []
+    assert backend.acquisitions == 0
+
+
+@pytest.mark.parametrize('side', [-1, 1])
+@pytest.mark.parametrize('eligible', [False, True])
+def test_tolerated_boundary_readbacks_survive_baseline_reimages_and_final_return(tmp_path, side, eligible):
+    class BoundaryReadback(SyntheticBackend):
+        def read_position(self):
+            return super().read_position() + side * np.array([.0005, .0005])
+
+    point = [side * 15, side * 15]
+    backend = BoundaryReadback(point)
+    backend.candidate_positions = np.array([point])
+
+    def measured(p):
+        obs = observation(p)
+        obs['metrics']['primary_metric'] = .01 if eligible else .1
+        return obs
+
+    c = Controller(settings(stage1_max_acquisitions=3, bo_initial_samples=0,
+                            max_acquisitions=7, target_m2=1000 if eligible else None),
+                   backend, tmp_path / 'log', measured)
+    result = c.run()
+    assert result['status'] == ('metric_target_reached' if eligible else 'unconfirmed')
+    assert [o['stage'] for o in c.history[-2:]] == ['final', 'final']
+    if not eligible:
+        assert len([o for o in c.history if o['stage'] == 'stage1']) == 2
+    for obs in c.history:
+        assert obs['target'] == point
+        np.testing.assert_array_equal(obs['position'], np.array(point) + side * .0005)
+    assert all(np.all(np.abs(after) <= 15) for _, after in backend.moves)
+    np.testing.assert_array_equal(result['final_readback'], np.array(point) + side * .0005)

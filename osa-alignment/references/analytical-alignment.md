@@ -94,7 +94,7 @@ motor units and limits that must be replaced with appropriate local values:
 | `stage1_max_acquisitions` | 15 | Stage 1 acquisition budget, including baseline; positive integer leaving at least one Stage 2 acquisition plus final confirmations |
 | `max_acquisitions` | 40 | Total budget including baseline and final confirmation images; transit moves take no images |
 | `confirmations` | 2 | Number of final reimages; at least two |
-| `readback_tolerance` | 0.001 | Maximum Euclidean readback discrepancy in motor units |
+| `readback_tolerance` | 0.001 | Maximum Euclidean readback discrepancy and per-axis allowance outside global bounds, in motor units; commanded targets remain within exact bounds |
 | `bo_halfwidth` | [5, 5] | Half-widths of a symmetric motor search box centered on the best eligible observation |
 | `bo_initial_samples` | 5 | Stage 1 initial measurements including baseline, and Stage 2 eligible random measurements before EI; 0 starts EI when a training observation exists |
 | `gp_length_scale` | [2.5, 2.5] | Initial Matérn-5/2 length scales and fallback before three distinct eligible locations, in motor units |

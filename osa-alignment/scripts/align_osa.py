@@ -179,7 +179,8 @@ class Controller:
         p = np.asarray(self.backend.read_position(), float)
         bounds = np.asarray(self.s.bounds)
         if (p.shape != (2,) or not np.isfinite(p).all()
-            or np.any(p < bounds[:, 0]) or np.any(p > bounds[:, 1])):
+            or np.any(p < bounds[:, 0] - self.s.readback_tolerance)
+            or np.any(p > bounds[:, 1] + self.s.readback_tolerance)):
             raise RuntimeError("Readback is nonfinite or outside allowed bounds")
         return p
 
@@ -200,7 +201,7 @@ class Controller:
         return actual
 
     def return_to_best(self, observation):
-        self.travel_to(observation["position"])
+        self.travel_to(observation["target"])
 
     def best_observed(self, bo_started):
         metric = "secondary_metric" if bo_started else "primary_metric"
@@ -353,7 +354,9 @@ class Controller:
         incumbent, reason, status = None, "budget exhausted", "best_found"
         bo_started = False
         try:
-            incumbent = self.acquire(self.position(), "Acquire baseline before choosing a move.", "baseline")
+            bounds = np.asarray(self.s.bounds)
+            baseline_target = np.clip(self.position(), bounds[:, 0], bounds[:, 1])
+            incumbent = self.acquire(baseline_target, "Acquire baseline before choosing a move.", "baseline")
             stage, initial_samples = "stage1", 0
             while self.acquisitions < self.s.max_acquisitions - self.s.confirmations:
                 primary_best = self.best_observed(False)
@@ -375,7 +378,7 @@ class Controller:
                     pool = self.stage1_candidates(initial=self.acquisitions < self.s.bo_initial_samples)
                     if not len(pool):
                         # A discrete or very small domain can be fully sampled before the budget.
-                        trial = np.asarray(primary_best["position"])
+                        trial = np.asarray(primary_best["target"])
                         plan, acquisition_stage = "Reimage best M1 after exhausting distinct Stage 1 candidates.", "stage1"
                     elif self.acquisitions < self.s.bo_initial_samples:
                         trial = pool[self.rng.integers(len(pool))]
@@ -438,7 +441,7 @@ class Controller:
             for _ in range(self.s.confirmations):
                 if self.acquisitions >= self.s.max_acquisitions:
                     break
-                obs = self.acquire(incumbent["position"], "Reimage final position to check metric stability.", "final")
+                obs = self.acquire(incumbent["target"], "Reimage final position to check metric stability.", "final")
                 confirmations.append(obs)
             stable = len(confirmations) == self.s.confirmations and all(feasible(o, self.s) for o in confirmations)
             if stable and self.s.target_m2 is not None and all(
