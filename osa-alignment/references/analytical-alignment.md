@@ -87,8 +87,8 @@ motor units and limits that must be replaced with appropriate local values:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `units`, `bounds`, `max_step` | required | Adapter units, `[x_min,x_max]` and `[y_min,y_max]`, maximum Euclidean displacement for every move including transit |
-| `min_step` | 0.5 | Smallest trial displacement/spacing, in motor units |
+| `units`, `bounds`, `max_step` | required | Adapter units, `[x_min,x_max]` and `[y_min,y_max]`, maximum Euclidean displacement for moves after random initialization, including final transit |
+| `min_step` | 0.5 | Smallest trial displacement/spacing after random initialization, in motor units |
 | `evaluator` | `{}` | Current-run evaluator options; omit semiaxes to fit them per image, or supply both to fix them |
 | `bo_stage_entrance_m1` | 0.02 | M1 threshold for Stage 2 entry and M2 observation eligibility |
 | `stage1_max_acquisitions` | 15 | Stage 1 acquisition budget, including baseline; positive integer leaving at least one Stage 2 acquisition plus final confirmations |
@@ -119,6 +119,8 @@ do not restrict this domain. All finite M1 observations train this GP, including
 failed fits and scores above the entry threshold. Use `gp_noise` to tolerate
 uncertain scores. The first `bo_initial_samples` measurements, counting the
 baseline, initialize the search randomly; 0 starts EI after the baseline.
+Random initialization ignores `min_step`/`max_step` and moves directly to each
+sampled target, avoiding duplicate positions and staying within global bounds.
 
 Enter Stage 2 when **either** the lowest observed M1 is at or below
 `bo_stage_entrance_m1` **or** `stage1_max_acquisitions` is exhausted. No consecutive
@@ -127,9 +129,10 @@ distinct candidate remains it reimages the best M1 until a transition condition
 is met. Its acquisition budget is part of `max_acquisitions`, which also reserves
 `confirmations` final images and at least one Stage 2 acquisition.
 
-Continuous proposals cover the global bounds and exclude measured positions within
-`min_step`. Targets farther than `max_step` use successive bounded transit moves
-without images. Exact-grid replay uses recorded locations connected by bounded
+Continuous proposals cover the global bounds. After random initialization,
+exclude measured positions within `min_step`. Subsequent BO targets farther
+than `max_step` use successive bounded transit moves without images. After
+initialization, exact-grid replay uses recorded locations connected by bounded
 moves; intermediate recorded waypoints need no acquisition. Motor readbacks are
 verified at every move and before/after acquisitions. Faults stop the run.
 
@@ -171,11 +174,13 @@ observation records eligibility and a rejection reason, and each model event
 lists the acquisitions defining exclusions. Nonfinite M2 alone excludes an
 observation from training without creating an M1 neighborhood exclusion.
 
-Initialization and EI sampling stay within global `bounds`, the local box with
-half-widths `bo_halfwidth`, and the M1 neighborhood exclusions above. Both filter
-displacements from the actual readback to `[min_step, max_step]` and exclude points
-within half `min_step` of any previously measured position. The local box moves
-with the best eligible observation.
+Initialization and EI sampling both stay within global `bounds`, the local box
+with half-widths `bo_halfwidth`, and the M1 neighborhood exclusions above. Random
+initialization ignores `min_step`/`max_step`, moves directly to each sampled
+target, and avoids exact duplicate measurements. Global bounds, readback
+verification, the local box, and M1 exclusions still apply. For subsequent EI sampling, filter displacements from the actual
+readback to `[min_step, max_step]` and exclude points within half `min_step` of
+any previously measured position. The local box moves with the best eligible observation.
 Continuous candidates are uniform random proposals within the box; exact-grid
 replay uses available recorded locations. A depleted filtered candidate pool
 ends the search with an explicit reason, including incomplete initialization

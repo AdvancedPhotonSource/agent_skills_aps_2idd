@@ -349,7 +349,7 @@ def test_final_return_uses_lowest_m2_after_bo_started(tmp_path, replay):
     assert result['acquisitions'] == 5
     assert result['final_readback'] == [3, 0]
     assert result['best_observed']['position'] == [3, 0]
-    assert [o['position'] for o in c.history] == [[0, 0], [3, 0], [6, 0], [3, 0], [3, 0]]
+    assert [o['position'] for o in c.history] == [[0, 0], [6, 0], [3, 0], [3, 0], [3, 0]]
 
 
 @pytest.mark.parametrize('options', [dict(bo_initial_samples=-1), dict(bo_initial_samples=1.5),
@@ -609,3 +609,87 @@ def test_smallest_supported_image_still_has_finite_m1(fixed):
     m = evaluate(np.zeros((16, 16)), config)
     assert np.isfinite(m['primary_metric'])
     assert not m['valid']
+
+
+@pytest.mark.parametrize('stage', [1, 2])
+def test_random_initialization_ignores_step_filters_but_keeps_search_domain(tmp_path, stage):
+    backend = SyntheticBackend([0, 0])
+    backend.candidate_positions = np.array([[0, 0], [.1, 0], [.4, 0], [12, 0], [14, 0], [16, 0]])
+    c = Controller(settings(min_step=1, max_step=2, bo_halfwidth=[12, 12]),
+                   backend, tmp_path / 'log')
+    baseline = observation([0, 0])
+    c.history = [baseline]
+    if stage == 1:
+        initial = c.stage1_candidates(initial=True)
+        later = c.stage1_candidates()
+        np.testing.assert_array_equal(initial, [[.1, 0], [.4, 0], [12, 0], [14, 0]])
+        np.testing.assert_array_equal(later, [[12, 0], [14, 0]])
+    else:
+        initial = c.candidates(baseline, initial=True)
+        later = c.candidates(baseline)
+        np.testing.assert_array_equal(initial, [[.1, 0], [.4, 0], [12, 0]])
+        assert len(later) == 0
+
+
+@pytest.mark.parametrize('stage', [1, 2])
+def test_random_acquisitions_move_directly_to_near_and_far_targets(tmp_path, stage):
+    backend = SyntheticBackend([0, 0])
+    backend.candidate_positions = np.array([[.25, 0], [12, 0]])
+
+    def measured(p):
+        obs = observation(p)
+        obs['metrics']['primary_metric'] = .1 if stage == 1 else .01
+        return obs
+
+    c = Controller(settings(min_step=1, max_step=2, bo_halfwidth=[15, 15],
+                            bo_initial_samples=3 if stage == 1 else 2,
+                            stage1_max_acquisitions=3, max_acquisitions=7, target_m2=None),
+                   backend, tmp_path / 'log', measured)
+    result = c.run()
+    assert result['status'] == ('unconfirmed' if stage == 1 else 'best_found')
+    initial = [o for o in c.history if o['stage'] == ('stage1_init' if stage == 1 else 'bo_init')]
+    assert len(initial) == 2
+    np.testing.assert_array_equal([o['position'] for o in initial], [[12, 0], [.25, 0]])
+    assert backend.acquisitions == 5
+    np.testing.assert_array_equal([after for _, after in backend.moves[:2]], [[12, 0], [.25, 0]])
+    # Only the later return to the final position uses transit moves.
+    plans = [e for e in events(c) if e['event'] == 'plan']
+    assert [e['stage'] for e in plans[:3]] == ['baseline'] + [initial[0]['stage']] * 2
+    assert all('Move directly' in e['text'] for e in plans[1:3])
+    assert all(np.linalg.norm(np.array(e['target']) - e['previous_readback']) <= 2 + 1e-9
+               for e in plans if e['stage'] not in ('stage1_init', 'bo_init'))
+
+
+def test_stage2_random_replay_allows_direct_moves_to_distant_recorded_locations(tmp_path):
+    backend = Replay(dict(units='um', samples=[dict(position=[x, 0], image=[x, 0])
+                                               for x in [0, .25, 3, 6, 12]]), [0, 0])
+    c = Controller(settings(max_step=3, bo_halfwidth=[15, 15]), backend, tmp_path / 'log')
+    baseline = observation([0, 0])
+    c.history = [baseline]
+    pool = c.candidates(baseline, initial=True)
+    np.testing.assert_array_equal(pool, [[.25, 0], [3, 0], [6, 0], [12, 0]])
+
+
+@pytest.mark.parametrize('stage', ['stage1_init', 'bo_init'])
+def test_initial_moves_still_enforce_global_bounds_and_readbacks(tmp_path, stage):
+    backend = SyntheticBackend([0, 0])
+    c = Controller(settings(max_step=2), backend, tmp_path / 'log', observation)
+    with pytest.raises(RuntimeError, match='bounds'):
+        c.acquire([16, 0], 'Outside global bounds', stage)
+    assert backend.moves == []
+    assert backend.acquisitions == 0
+    # The physical step limit still applies outside initialization.
+    with pytest.raises(RuntimeError, match='maximum displacement'):
+        c.acquire([12, 0], 'Normal BO', 'bo')
+    assert backend.moves == []
+
+    class Faulty(SyntheticBackend):
+        def move_absolute(self, target):
+            super().move_absolute(np.asarray(target) + [1, 0])
+
+    faulty = Faulty([0, 0])
+    c = Controller(settings(max_step=2), faulty, tmp_path / 'fault', observation)
+    with pytest.raises(RuntimeError, match='readback'):
+        c.acquire([12, 0], 'Direct initialization', stage)
+    assert len(faulty.moves) == 1
+    assert faulty.acquisitions == 0

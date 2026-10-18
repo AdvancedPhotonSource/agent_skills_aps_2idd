@@ -183,13 +183,13 @@ class Controller:
             raise RuntimeError("Readback is nonfinite or outside allowed bounds")
         return p
 
-    def move(self, target, plan, stage):
+    def move(self, target, plan, stage, *, limit_step=True):
         before = self.position()
         target = np.asarray(target, float)
         bounds = np.asarray(self.s.bounds)
         if (target.shape != (2,) or not np.isfinite(target).all()
             or np.any(target < bounds[:, 0]) or np.any(target > bounds[:, 1])
-            or np.linalg.norm(target - before) > self.s.max_step + 1e-9):
+            or (limit_step and np.linalg.norm(target - before) > self.s.max_step + 1e-9)):
             raise RuntimeError("Proposed move exceeds bounds or maximum displacement")
         self.record("plan", text=plan, target=target.tolist(), previous_readback=before.tolist(), stage=stage)
         if np.linalg.norm(target - before) > 1e-12:
@@ -213,7 +213,8 @@ class Controller:
         if self.acquisitions >= self.s.max_acquisitions:
             raise RuntimeError("Acquisition budget exhausted")
         target = np.asarray(target, float)
-        actual = self.move(target, plan, stage)
+        actual = self.move(target, plan, stage,
+                           limit_step=stage not in {"stage1_init", "bo_init"})
         self.acquisitions += 1
         image = self.backend.acquire_image()
         after = self.position()
@@ -263,7 +264,7 @@ class Controller:
         self.current = obs
         return obs
 
-    def candidates(self, incumbent):
+    def candidates(self, incumbent, *, initial=False):
         p = np.array(incumbent["position"])
         bounds = np.asarray(self.s.bounds)
         if hasattr(self.backend, "candidate_positions"):
@@ -273,15 +274,16 @@ class Controller:
             hi = np.minimum(bounds[:, 1], p + self.s.bo_halfwidth)
             pool = self.rng.uniform(lo, hi, (self.s.bo_candidates, 2))
         allowed = np.all((pool >= bounds[:, 0]) & (pool <= bounds[:, 1]), axis=1)
-        distance = np.linalg.norm(pool - self.position(), axis=1)
-        allowed &= ((distance <= self.s.max_step + 1e-9)
-                    & (distance >= self.s.min_step - 1e-9))
+        if not initial:
+            distance = np.linalg.norm(pool - self.position(), axis=1)
+            allowed &= ((distance <= self.s.max_step + 1e-9)
+                        & (distance >= self.s.min_step - 1e-9))
         allowed &= np.all(np.abs(pool - p) <= np.asarray(self.s.bo_halfwidth) + 1e-9, axis=1)
         pool = pool[allowed]
         if len(pool) and self.history:
             seen = np.array([o["position"] for o in self.history])
             pool = pool[np.min(np.linalg.norm(pool[:, None] - seen[None, :], axis=2), axis=1)
-                        >= self.s.min_step * 0.5]
+                        >= (1e-9 if initial else self.s.min_step * 0.5)]
         rejected = [o["position"] for o in self.history
                     if not eligible_geometry(o, self.s)]
         if len(pool) and rejected:
@@ -289,7 +291,7 @@ class Controller:
             pool = pool[np.all(np.sum(offsets ** 2, axis=2) > 1., axis=1)]
         return pool
 
-    def stage1_candidates(self):
+    def stage1_candidates(self, *, initial=False):
         """Propose throughout the global bounds without geometry exclusions."""
         bounds = np.asarray(self.s.bounds)
         pool = (np.asarray(self.backend.candidate_positions, float)
@@ -300,8 +302,8 @@ class Controller:
         if len(pool) and self.history:
             seen = np.array([o["position"] for o in self.history])
             pool = pool[np.min(np.linalg.norm(pool[:, None] - seen[None, :], axis=2), axis=1)
-                        >= self.s.min_step]
-        if self.replay and len(pool):
+                        >= (1e-9 if initial else self.s.min_step)]
+        if not initial and self.replay and len(pool):
             reachable, _ = self.replay_routes()
             pool = pool[[tuple(p) in reachable for p in pool]]
         return pool
@@ -370,19 +372,20 @@ class Controller:
                                 length_scales_fitted=fitted, training_count=len(gp.X_train_),
                                 training_acquisitions=[o["acquisition"] for o in self.history],
                                 exclusion_acquisitions=[])
-                    pool = self.stage1_candidates()
+                    pool = self.stage1_candidates(initial=self.acquisitions < self.s.bo_initial_samples)
                     if not len(pool):
                         # A discrete or very small domain can be fully sampled before the budget.
                         trial = np.asarray(primary_best["position"])
                         plan, acquisition_stage = "Reimage best M1 after exhausting distinct Stage 1 candidates.", "stage1"
                     elif self.acquisitions < self.s.bo_initial_samples:
                         trial = pool[self.rng.integers(len(pool))]
-                        plan, acquisition_stage = "Random global M1 initialization.", "stage1_init"
+                        plan, acquisition_stage = f"Move directly to random M1 initialization target {trial.tolist()}.", "stage1_init"
                     else:
                         scores = expected_improvement(gp, pool, float(primary_best["metrics"]["primary_metric"]), self.s)
                         trial = pool[np.argmax(scores)]
                         plan, acquisition_stage = f"Global M1 BO trial; EI={scores.max():.5g}.", "stage1"
-                    self.travel_to(trial)
+                    if acquisition_stage != "stage1_init":
+                        self.travel_to(trial)
                     self.acquire(trial, plan, acquisition_stage)
                     continue
 
@@ -404,7 +407,7 @@ class Controller:
                                 exclusion_acquisitions=[o["acquisition"] for o in self.history
                                     if not eligible_geometry(o, self.s)])
                 initializing = initial_samples < self.s.bo_initial_samples or gp is None
-                pool = self.candidates(incumbent)
+                pool = self.candidates(incumbent, initial=initializing)
                 if not len(pool):
                     reason = "no sampleable candidates after travel, spacing, and M1 exclusions"
                     if initial_samples < self.s.bo_initial_samples or gp is None:
@@ -412,7 +415,8 @@ class Controller:
                     break
                 if initializing:
                     trial = pool[self.rng.integers(len(pool))]
-                    plan = f"Random M2 BO initialization {initial_samples + 1}/{self.s.bo_initial_samples} eligible locations."
+                    plan = (f"Move directly to random M2 initialization target {trial.tolist()}; "
+                            f"{initial_samples + 1}/{self.s.bo_initial_samples} eligible locations.")
                     acquisition_stage = "bo_init"
                 else:
                     scores = expected_improvement(gp, pool, float(incumbent["metrics"]["secondary_metric"]), self.s)

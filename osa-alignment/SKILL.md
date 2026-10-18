@@ -133,9 +133,11 @@ No calibration file, centroid vector, reference center, Jacobian, or eta is used
 The bundled [alignment settings](scripts/alignment.json) allocate 15 of the 40
 acquisitions to Stage 1, use `M1 <= 0.02` for Stage 2 entry and eligibility, and
 reserve two final confirmation images from the total budget. Set `bounds` for
-the intended global search region and motor coordinate frame. Every physical
-move respects `max_step`; distant global BO targets and final returns use bounded
-transit moves without acquisitions.
+the intended global search region and motor coordinate frame. Random
+initialization in both stages ignores `min_step`/`max_step`, moving directly to
+each sampled target within global bounds. Stage 2 retains its local box and M1
+exclusions. Subsequent moves respect `max_step`; distant Stage 1 BO targets and
+final returns use bounded transit moves without acquisitions.
 Set `bo_initial_samples` for both stages (Stage 1 includes the baseline; Stage 2
 counts eligible random measurements). Configure image fitting through `evaluator`. Supplying both
 `inner_axes` and `outer_axes` is strongly recommended for accurate fitting.
