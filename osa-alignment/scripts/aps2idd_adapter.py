@@ -32,13 +32,14 @@ class APS2IDDAdapter:
             or self.operation_timeout <= max(self.motion_timeout + self.settle_time,
                                              self.acquisition_timeout)):
             raise ValueError("Require finite positive timeouts and an operation timeout longer than motion/acquisition")
-        self.identity = dict(user=config.get("user", "osa-alignment"),
-                             user_group=config.get("user_group", "primary"))
+        self.identity = dict(user=config.get("user", "user2idd"),
+                             user_group=config.get("user_group", "root"))
         if client is None:
             if parsed.scheme == "tcp":
                 from bluesky_queueserver_api.zmq import REManagerAPI
-                client = REManagerAPI(zmq_control_addr=url, timeout_recv=self.request_timeout,
-                                      timeout_send=self.request_timeout)
+                # client = REManagerAPI(zmq_control_addr=url, timeout_recv=self.request_timeout,
+                #                       timeout_send=self.request_timeout)
+                client = REManagerAPI()
             else:
                 from bluesky_queueserver_api.http import REManagerAPI
                 client = REManagerAPI(http_server_uri=url, timeout=self.request_timeout)

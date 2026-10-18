@@ -2,12 +2,12 @@
   "units": "um",
   "bounds": [
     [
-      -15.0,
-      15.0
+      -3000.0,
+      3000.0
     ],
     [
-      -15.0,
-      15.0
+      -3000.0,
+      3000.0
     ]
   ],
   "max_step": 5.0,
@@ -16,15 +16,16 @@
   "min_coverage": 0.3,
   "evaluator": {
     "inner_axes": [
-      37.841116892118016,
-      33.66231727280725
+      76,
+      62
     ],
     "outer_axes": [
-      102.1991801297988,
-      91.9040576715142
+      148,
+      140
     ]
   },
   "eta": 0.75,
   "max_acquisitions": 40,
-  "bo_stage_entrance_m1": 0.012
+  "bo_stage_entrance_m1": 0.02,
+  "readback_tolerance": 10
 }
