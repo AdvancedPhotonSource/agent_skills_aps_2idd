@@ -46,12 +46,13 @@ th, td { padding: 8px; text-align: left; border-bottom: 1px solid #e8eef2; white
 <section class="card"><h2>Run settings</h2><p id="mode" class="muted"></p><pre id="settings"></pre></section>
 </div>
 <section class="card" style="margin-top:16px"><h2>Current activity</h2><div id="updated" class="muted"></div><p id="message"></p><p id="final" class="muted"></p></section>
-<section class="card" style="margin-top:16px"><h2>Observation history</h2><div class="scroll"><table><thead><tr><th>#</th><th>Stage</th><th>x</th><th>y</th><th>M1</th><th>M2</th><th>BO eligibility</th></tr></thead><tbody id="history"></tbody></table></div></section>
+<section class="card" style="margin-top:16px"><h2>Observation history</h2><p class="muted">Ellipse centers and semiaxes are in detector pixels. Angle is clockwise from image +x toward +y. Failed fits retain their candidate parameters when available.</p><div class="scroll"><table><thead><tr><th>#</th><th>Stage</th><th>Motor x</th><th>Motor y</th><th>M1</th><th>M2</th><th>Fit</th><th>Center (x, y), px</th><th>Inner (a, b), px</th><th>Outer (a, b), px</th><th>Angle (°)</th><th>Axes</th><th>BO eligibility</th></tr></thead><tbody id="history"></tbody></table></div></section>
 <script>
 const initialState = /* INITIAL_STATE */ null;
 const byId = id => document.getElementById(id);
 const finite = value => typeof value === 'number' && Number.isFinite(value);
 const format = value => finite(value) ? Number(value.toPrecision(5)).toString() : (value ?? '—');
+const formatPair = values => Array.isArray(values) && values.length === 2 ? `(${values.map(format).join(', ')})` : '—';
 function node(tag, attrs = {}, text = null) {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
   for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value);
@@ -141,7 +142,12 @@ function render(state) {
   plot('secondary', rows, 'secondary_metric', settings);
   byId('history').replaceChildren(...rows.slice().reverse().map(o => {
     const tr = document.createElement('tr');
-    for (const value of [o.acquisition, o.stage, ...o.position.map(format), format(o.metrics.primary_metric), format(o.metrics.secondary_metric), o.bo_eligible ? 'Eligible' : o.bo_rejection_reason]) {
+    const fit = o.metrics.fit;
+    const fitStatus = fit ? (o.metrics.valid ? 'Valid' : 'Failed validation') : 'No fit';
+    const axesMode = typeof fit?.axes_fixed === 'boolean' ? (fit.axes_fixed ? 'Fixed' : 'Fitted') : '—';
+    for (const value of [o.acquisition, o.stage, ...o.position.map(format), format(o.metrics.primary_metric), format(o.metrics.secondary_metric),
+      fitStatus, fit ? formatPair([fit.center_x, fit.center_y]) : '—', formatPair(fit?.inner_axes), formatPair(fit?.outer_axes),
+      format(fit?.angle_degrees), axesMode, o.bo_eligible ? 'Eligible' : o.bo_rejection_reason]) {
       const td = document.createElement('td'); td.textContent = value; tr.append(td);
     }
     return tr;

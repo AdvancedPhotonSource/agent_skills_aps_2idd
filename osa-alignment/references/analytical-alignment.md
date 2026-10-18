@@ -237,7 +237,10 @@ uv run --project scripts --locked python scripts/align_osa.py \
 Open the printed URL, normally `http://127.0.0.1:8765/`, while alignment runs.
 The dashboard shows settings, the latest acquired image,
 acquisition positions, M1 with its BO entry threshold, M2, and observation history
-with stages and eligibility. Trajectory axes use equal motor-unit scales.
+with stages, eligibility, fit validity, fitted center, inner/outer semiaxes, angle,
+and whether semiaxes were fixed or fitted. Centers and semiaxes use detector
+pixels; motor positions use the configured motor units. Failed fits show their
+retained candidate parameters, and unavailable parameters appear as dashes. Trajectory axes use equal motor-unit scales.
 Nonfinite metrics leave gaps in the charts and remain explicit in the table.
 Detector previews use per-image linear min/max scaling; metric calculations
 retain the original intensity units. The trajectory's latest marker denotes the
