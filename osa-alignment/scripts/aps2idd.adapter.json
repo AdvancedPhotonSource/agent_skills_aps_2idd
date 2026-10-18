@@ -1,8 +1,8 @@
 {
-  "url": "REPLACE_WITH_QUEUESERVER_URL",
-  "user": "osa-alignment",
-  "user_group": "primary",
-  "request_timeout": 5.0,
+  "url": "tcp://sec2idd.xray.aps.anl.gov:60625",
+  "user": "user2idd",
+  "user_group": "root",
+  "request_timeout": 20.0,
   "operation_timeout": 60.0,
   "motion_timeout": 30.0,
   "acquisition_timeout": 6.0,
