@@ -43,7 +43,7 @@ th, td { padding: 8px; text-align: left; border-bottom: 1px solid #e8eef2; white
 </div>
 <div class="details">
 <section class="card"><h2>Latest acquired image</h2><figure><img id="image" alt="Latest OSA detector image" hidden><figcaption id="image-note">Waiting for an image</figcaption></figure></section>
-<section class="card"><h2>Run settings</h2><p id="mode" class="muted"></p><pre id="settings"></pre><details><summary>Calibration</summary><pre id="calibration"></pre></details></section>
+<section class="card"><h2>Run settings</h2><p id="mode" class="muted"></p><pre id="settings"></pre></section>
 </div>
 <section class="card" style="margin-top:16px"><h2>Current activity</h2><div id="updated" class="muted"></div><p id="message"></p><p id="final" class="muted"></p></section>
 <section class="card" style="margin-top:16px"><h2>Observation history</h2><div class="scroll"><table><thead><tr><th>#</th><th>Stage</th><th>x</th><th>y</th><th>M1</th><th>M2</th><th>BO eligibility</th></tr></thead><tbody id="history"></tbody></table></div></section>
@@ -128,9 +128,8 @@ function render(state) {
   byId('count').textContent = `${state.result?.acquisitions ?? rows.length} / ${settings.max_acquisitions ?? '—'}`;
   byId('m1').textContent = format(latest?.metrics.primary_metric);
   byId('m2').textContent = format(latest?.metrics.secondary_metric);
-  byId('mode').textContent = `${state.replay ? 'Recorded-image replay' : 'Adapter acquisition'} · Motor units: ${settings.units ?? '—'} · Effective eta: ${settings.eta ?? state.calibration.eta ?? '—'}`;
+  byId('mode').textContent = `${state.replay ? 'Recorded-image replay' : 'Adapter acquisition'} · Motor units: ${settings.units ?? '—'}`;
   byId('settings').textContent = Object.entries(settings).map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join('\n');
-  byId('calibration').textContent = JSON.stringify(state.calibration, null, 2);
   byId('message').textContent = state.message;
   byId('updated').textContent = state.updated ? `Last event: ${new Date(state.updated).toLocaleString()}` : '';
   byId('final').textContent = state.result ? `Final readback: ${JSON.stringify(state.result.final_readback)} · ${state.result.reason}` : '';

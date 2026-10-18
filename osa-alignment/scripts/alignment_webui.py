@@ -47,7 +47,7 @@ class Dashboard:
         self.url = f"http://127.0.0.1:{self.server.server_port}/"
 
     def state(self):
-        state = {"settings": {}, "calibration": {}, "observations": [], "result": None,
+        state = {"settings": {}, "observations": [], "result": None,
                  "message": "Waiting for the first acquisition", "updated": None,
                  "image": None, "image_note": "Waiting for an image"}
         with self.log_path.open() as stream:
@@ -58,7 +58,7 @@ class Dashboard:
                 event = json.loads(line)
                 state["updated"] = event["time"]
                 if event["event"] == "start":
-                    state.update(settings=event["settings"], calibration=event["calibration"],
+                    state.update(settings=event["settings"],
                                  replay=event["replay"])
                 elif event["event"] == "observation":
                     state["observations"].append(event["observation"])

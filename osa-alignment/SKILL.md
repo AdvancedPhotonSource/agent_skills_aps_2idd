@@ -1,6 +1,6 @@
 ---
 name: osa-alignment
-description: Align an order sorting aperture (OSA) in a synchrotron X-ray microscope using calibrated analytical scripts to evaluate illumination and adjust transverse position. Use for OSA calibration, automated alignment, and diagnosing asymmetric donut illumination or stray signal in its central hole.
+description: Align an order sorting aperture (OSA) in a synchrotron X-ray microscope using ellipse metrics and Bayesian optimization to evaluate illumination and adjust transverse position. Use for automated OSA alignment, and diagnosing asymmetric donut illumination or stray signal in its central hole.
 ---
 
 # OSA alignment
@@ -11,8 +11,8 @@ to the optics should produce a symmetric, complete donut with a clean, dark hole
 The two quantitative objectives are well-defined concentric boundaries and low
 integrated intensity inside the hole.
 
-**Use the analytical scripts by default.** They handle calibration, image evaluation,
-and the iterative motor search. Detailed input formats, configuration parameters,
+**Use the analytical scripts by default.** They handle image evaluation and the
+two-stage Bayesian motor search. Detailed input formats, configuration parameters,
 and integration instructions are in [the analytical guide](references/analytical-alignment.md).
 
 ## Recognize the target in words
@@ -55,8 +55,8 @@ relative to the aligned reference, not absolute motor readbacks.
 | (+15, −15) | A conspicuous bright compact spot lies in the central region, with several rays extending toward the upper and left sectors. The surrounding ring is dim and uneven. The internal bright signal makes this unacceptable even if parts of the outer contour look round. | [Contaminated hole](assets/x_15_y_m15.png) |
 
 Small offsets can produce images that resemble the reference closely. Appearance
-alone does not establish an exact motor offset; camera orientation and the motor
-response are determined by local calibration. Example PNG brightness is qualitative,
+alone does not establish an exact motor offset; the controller searches the
+configured motor bounds directly. Example PNG brightness is qualitative,
 not calibrated photon counts.
 
 ## Script usage
@@ -117,49 +117,32 @@ and hole area; it has no universal acceptable cutoff. Fixed semiaxes and consist
 acquisition settings make comparisons meaningful. A low sum can still conceal
 a localized bright spot.
 
-### Calibrate
-
-[scripts/calibrate_alignment.py](scripts/calibrate_alignment.py) uses recorded
-images at known motor positions around a good reference to estimate the reference
-centroid offset, motor response, and step gain eta. Its calibration JSON contains
-only `reference_error`, `jacobian`, and `eta`.
-Runtime settings and diagnostics are saved separately as `calibration.alignment.json`
-and `calibration.report.json` by default. Reuse an existing calibration when
-its optics, camera orientation, units, and intensity conditions still apply.
-
-```sh
-uv run --project scripts --locked python scripts/calibrate_alignment.py calibration-images.json \
-  --reference-position 0 0 --max-step 5 --output calibration.json
-```
-
-The reference coordinates and maximum step above are illustrative values in the
-manifest's motor units. See [calibration inputs and options](references/analytical-alignment.md#calibration-from-recorded-images).
-
 ### Run alignment
 
-[scripts/align_osa.py](scripts/align_osa.py) aligns the OSA in two stages: 
-in stage 1, it performs stepped search using
-search directions derived from the calibrated offset vector from the fitted
-donut center to the centroid of the image until M1 meets its threshold; in stage 2, it performs random 
-initialization and local Bayesian optimization of M2. Eligible observations train one objective GP; high-M1 images
-exclude neighborhoods from further sampling. The final position is the best
-eligible observation, verified by repeated images.
-The calibration file is required. Eta defaults to its calibrated value and can
-be overridden in the alignment configuration. The bundled
-[calibration](scripts/calibration.json) and [runtime settings](scripts/calibration.alignment.json)
-are available for a compatible motor-to-centroid response; diagnostics are in the
-[separate report](scripts/calibration.report.json).
-The bundled runtime settings use `eta = 0.75`, BO entry and eligibility at
-`M1 <= 0.012`, and a 30-acquisition budget including random initialization,
-coarse restores, and final confirmations. Configure image fitting for the current run through the
-runtime `evaluator` object and `centroid_percentile` (default 10). Semiaxes are
-fitted per image unless both `inner_axes` and `outer_axes` are explicitly supplied
-in `evaluator`. Image dimensions and absolute ellipse position may differ from
-the calibration images. Supplying the semiaxes is strongly recommended for accurate fitting.
+[scripts/align_osa.py](scripts/align_osa.py) aligns the OSA in two stages.
+Stage 1 uses Bayesian optimization to minimize M1 across the full `bounds` in
+the alignment config, including finite scores from failed fits. It enters Stage 2
+as soon as either M1 meets `bo_stage_entrance_m1` or `stage1_max_acquisitions` is
+used up. The baseline counts toward the Stage 1 budget. Stage 2 uses random
+initialization and local Bayesian optimization to minimize M2, retaining its
+M1 eligibility constraint and neighborhood exclusions. The final position is the
+best eligible observation, verified by repeated images. If none is eligible,
+return to the lowest observed M1 and report an unconfirmed result.
+
+No calibration file, centroid vector, reference center, Jacobian, or eta is used.
+The bundled [alignment settings](scripts/alignment.json) allocate 15 of the 40
+acquisitions to Stage 1, use `M1 <= 0.02` for Stage 2 entry and eligibility, and
+reserve two final confirmation images from the total budget. Set `bounds` for
+the intended global search region and motor coordinate frame. Every physical
+move respects `max_step`; distant global BO targets and final returns use bounded
+transit moves without acquisitions.
+Set `bo_initial_samples` for both stages (Stage 1 includes the baseline; Stage 2
+counts eligible random measurements). Configure image fitting through `evaluator`. Supplying both
+`inner_axes` and `outer_axes` is strongly recommended for accurate fitting.
 
 ```sh
 uv run --project scripts --locked python scripts/align_osa.py \
-  --calibration calibration.json --config calibration.alignment.json \
+  --config scripts/alignment.json \
   --adapter beamline_adapter:create_adapter --adapter-config beamline.json \
   --log trajectory.jsonl --output result.json
 ```

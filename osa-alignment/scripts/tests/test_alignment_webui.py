@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import align_osa
 from alignment_webui import Dashboard
-from test_analytical_alignment import SyntheticBackend, calibration, observation, settings
+from test_analytical_alignment import SyntheticBackend, observation, settings
 
 
 def request(dashboard, path="api/status", method="GET"):
@@ -26,22 +26,22 @@ def test_live_updates_partial_records_and_read_only_routes(tmp_path):
     image = tmp_path / "detector.tif"
     Image.fromarray(np.arange(400, dtype=np.uint16).reshape(20, 20)).save(image)
 
-    def measurement(p, c):
+    def measurement(p):
         obs = observation(p, invalid=backend.acquisitions == 1)
         obs["image"] = str(image)
         return obs
 
-    controller = align_osa.Controller(calibration(), settings(), backend, tmp_path / "run.jsonl", measurement)
+    controller = align_osa.Controller(settings(), backend, tmp_path / "run.jsonl", measurement)
     dashboard = Dashboard(controller.log_path, port=0)
     dashboard.start()
     try:
         initial = json.load(request(dashboard))
         assert initial["observations"] == []
         assert initial["settings"]["max_acquisitions"] == 40
-        controller.acquire([0, 0], "Baseline", "coarse")
+        controller.acquire([0, 0], "Baseline", "baseline")
         first = json.load(request(dashboard))
         assert len(first["observations"]) == 1
-        assert first["observations"][0]["metrics"]["primary_metric"] == "inf"
+        assert first["observations"][0]["metrics"]["primary_metric"] == .01
         assert first["image"].startswith("data:image/png;base64,")
         controller.acquire([1, 0], "Next trial", "bo")
         second = json.load(request(dashboard))
@@ -52,7 +52,7 @@ def test_live_updates_partial_records_and_read_only_routes(tmp_path):
         assert json.load(request(dashboard))["observations"] == second["observations"]
         counts = (len(backend.moves), backend.acquisitions)
         for path, method, status in [("api/status", "POST", 501), ("api/status", "PUT", 501),
-                                     ("api/status", "DELETE", 501), ("../calibration.json", "GET", 404),
+                                     ("api/status", "DELETE", 501), ("../alignment.json", "GET", 404),
                                      ("api/status?image=/etc/passwd", "GET", 404)]:
             with pytest.raises(HTTPError) as error:
                 request(dashboard, path, method)
@@ -71,9 +71,8 @@ def test_cli_flag_preserves_results_and_saves_final_snapshot(tmp_path, monkeypat
     for enabled in (False, True):
         folder = tmp_path / str(enabled)
         folder.mkdir()
-        (folder / "cal.json").write_text(json.dumps(calibration()))
         (folder / "config.json").write_text(json.dumps({"units": "um", "bounds": [[-15, 15], [-15, 15]],
-            "max_step": 5, "target_m2": 10, "max_acquisitions": 8}))
+            "max_step": 5, "target_m2": 10, "max_acquisitions": 8, "stage1_max_acquisitions": 3}))
         backend = SyntheticBackend([0, 0])
         if blocked:
             def fail_acquisition():
@@ -81,8 +80,8 @@ def test_cli_flag_preserves_results_and_saves_final_snapshot(tmp_path, monkeypat
             backend.acquire_image = fail_acquisition
         monkeypatch.setattr(align_osa.importlib, "import_module", lambda name: type("Adapter", (), {
             "create": staticmethod(lambda options: backend)}))
-        monkeypatch.setattr(align_osa, "measure", lambda p, c, **kwargs: observation(p))
-        argv = ["align_osa.py", "--calibration", str(folder / "cal.json"), "--config", str(folder / "config.json"),
+        monkeypatch.setattr(align_osa, "measure", lambda p, **kwargs: observation(p))
+        argv = ["align_osa.py", "--config", str(folder / "config.json"),
                 "--adapter", "synthetic:create", "--log", str(folder / "run.jsonl"), "--output", str(folder / "result.json")]
         if enabled:
             argv += ["--webui", "--webui-port", "0"]
@@ -108,7 +107,7 @@ def test_cli_flag_preserves_results_and_saves_final_snapshot(tmp_path, monkeypat
 
 
 def test_snapshot_escapes_log_content_and_preserves_existing_file(tmp_path):
-    controller = align_osa.Controller(calibration(), settings(), SyntheticBackend([0, 0]), tmp_path / "run.jsonl")
+    controller = align_osa.Controller(settings(), SyntheticBackend([0, 0]), tmp_path / "run.jsonl")
     controller.record("fault", text="</script><script>alert('test')</script>")
     dashboard = Dashboard(controller.log_path, port=0)
     assert "</script><script>" not in dashboard.html(dashboard.state())

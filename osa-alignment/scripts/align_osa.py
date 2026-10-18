@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Align an OSA with calibrated vector corrections and local Bayesian search."""
+"""Align an OSA using global M1 and local M2 Bayesian optimization."""
 from __future__ import annotations
 
 import argparse
@@ -15,7 +15,7 @@ from scipy.stats import norm
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
 
-from calibrate_alignment import load_manifest, measure, write_json
+from alignment_io import load_manifest, measure, write_json
 from evaluate_alignment import Config, json_safe
 
 
@@ -25,13 +25,9 @@ class Settings:
     bounds: list[list[float]]
     max_step: float
     min_step: float = 0.5
-    min_vector: float = 0.5
-    min_coverage: float = 0.3
     evaluator: dict = field(default_factory=dict)
-    centroid_percentile: float = 10.0
-    eta: float | None = None
     bo_stage_entrance_m1: float = 0.02
-    geometry_improvement: float = 0.0001
+    stage1_max_acquisitions: int = 15
     max_acquisitions: int = 40
     confirmations: int = 2
     readback_tolerance: float = 0.001
@@ -40,24 +36,21 @@ class Settings:
     gp_length_scale_bounds: tuple[float, float] = (0.5, 10.)
     bo_initial_samples: int = 5
     gp_noise: float = 0.05
-    gp_coarse_noise_multiplier: float = 3.0
+    gp_stage1_noise_multiplier: float = 3.0
     ei_xi: float = 0.0
     min_ei: float = 0.0
     bo_candidates: int = 256
     target_m2: float | None = None
     seed: int = 0
 
-    def validate(self, calibration):
+    def validate(self):
         bounds = np.asarray(self.bounds, float)
         numbers = [self.max_step, self.min_step, self.bo_stage_entrance_m1,
-                   self.geometry_improvement, self.readback_tolerance,
+                   self.readback_tolerance,
                    *self.bo_halfwidth, *self.gp_length_scale, *self.gp_length_scale_bounds, self.gp_noise, self.ei_xi, self.min_ei,
-                   self.min_vector, self.min_coverage, self.centroid_percentile,
-                   self.gp_coarse_noise_multiplier]
+                   self.gp_stage1_noise_multiplier]
         if (bounds.shape != (2, 2) or not np.isfinite(bounds).all()
             or np.any(bounds[:, 0] >= bounds[:, 1]) or not np.isfinite(numbers).all()
-            or self.min_vector < 0 or not 0 <= self.min_coverage <= 1
-            or not 0 <= self.centroid_percentile < 100
             or not 0 < self.min_step <= self.max_step
             or not 0 < self.bo_stage_entrance_m1
             or min(self.bo_halfwidth) <= 0 or len(self.bo_halfwidth) != 2
@@ -67,27 +60,18 @@ class Settings:
             or any(not self.gp_length_scale_bounds[0] <= v <= self.gp_length_scale_bounds[1]
                    for v in self.gp_length_scale)
             or self.gp_noise <= 0 or self.readback_tolerance <= 0
-            or self.gp_coarse_noise_multiplier < 1
-            or min(self.geometry_improvement, self.ei_xi, self.min_ei) < 0):
+            or self.gp_stage1_noise_multiplier < 1
+            or min(self.ei_xi, self.min_ei) < 0):
             raise ValueError("Invalid bounds, thresholds, step sizes, or GP settings")
         if (not all(isinstance(x, int) for x in [self.max_acquisitions, self.confirmations,
-                                               self.bo_candidates, self.bo_initial_samples, self.seed])
+                                               self.bo_candidates, self.bo_initial_samples, self.stage1_max_acquisitions, self.seed])
             or self.confirmations < 2 or self.max_acquisitions < self.confirmations + 3
+            or not 1 <= self.stage1_max_acquisitions < self.max_acquisitions - self.confirmations
             or self.bo_initial_samples < 0 or self.bo_candidates < 4 or self.seed < 0):
             raise ValueError("Require >=2 confirmations, sufficient acquisition budget, and >=4 candidates")
-        if self.eta is not None and (not np.isfinite(self.eta) or self.eta <= 0):
-            raise ValueError("eta must be positive and finite")
         if self.target_m2 is not None and not np.isfinite(self.target_m2):
             raise ValueError("target_m2 must be finite")
         Config(**self.evaluator).validate()
-        reference_error = np.asarray(calibration["reference_error"], float)
-        if reference_error.shape != (2,) or not np.isfinite(reference_error).all():
-            raise ValueError("reference_error must contain two finite pixel offsets")
-        jacobian = np.asarray(calibration["jacobian"], float)
-        if jacobian.shape != (2, 2) or not np.isfinite(jacobian).all() or np.linalg.matrix_rank(jacobian) < 2:
-            raise ValueError("Invalid calibrated motor response")
-        if not np.isfinite(calibration["eta"]) or calibration["eta"] <= 0:
-            raise ValueError("Invalid calibrated gain")
 
 
 class Replay:
@@ -128,20 +112,23 @@ def feasible(observation, settings):
                 and np.isfinite(float(observation["metrics"]["secondary_metric"])))
 
 
-def geometry(observation):
-    return float(observation["metrics"].get("geometry_score", float("inf")))
+def objective_observations(observations, settings, metric):
+    if metric == "primary_metric":
+        return [o for o in observations if np.isfinite(float(o["metrics"][metric]))]
+    return [o for o in observations if feasible(o, settings)]
 
 
-def fit_objective(observations, settings):
-    """Fit only eligible M2, including repeats and worse objective values."""
-    eligible = [o for o in observations if feasible(o, settings)]
+def fit_objective(observations, settings, metric="secondary_metric"):
+    """Model every finite M1, or only eligible M2, including repeated measurements."""
+    eligible = objective_observations(observations, settings, metric)
     if not eligible:
         raise ValueError("Expected improvement needs an eligible observation")
     x = np.array([o["position"] for o in eligible])
-    y = np.array([float(o["metrics"]["secondary_metric"]) for o in eligible])
+    y = np.array([float(o["metrics"][metric]) for o in eligible])
     noise = np.array([settings.gp_noise * (
-        settings.gp_coarse_noise_multiplier if o.get("stage") == "coarse" else 1.)
-        for o in eligible])
+        settings.gp_stage1_noise_multiplier
+        if metric == "secondary_metric" and o.get("stage") in {"baseline", "stage1", "stage1_init"}
+        else 1.) for o in eligible])
     # Repeated confirmations alone cannot identify spatial length scales.
     fitted = len(np.unique(x, axis=0)) >= 3
     kernel = Matern(length_scale=settings.gp_length_scale,
@@ -153,22 +140,22 @@ def fit_objective(observations, settings):
     return gp, fitted
 
 
-def expected_improvement(gp, candidates, best_m2, settings):
+def expected_improvement(gp, candidates, best_value, settings):
     mu, std = gp.predict(np.asarray(candidates), return_std=True)
     std = np.maximum(std, 1e-12)
-    improvement = best_m2 - mu - settings.ei_xi
+    improvement = best_value - mu - settings.ei_xi
     z = improvement / std
     return np.maximum(improvement * norm.cdf(z) + std * norm.pdf(z), 0)
 
 
 class Controller:
-    def __init__(self, calibration, settings, backend, log_path, measurement=None):
-        settings.validate(calibration)
+    def __init__(self, settings, backend, log_path, measurement=None):
+        settings.validate()
         if backend.units != settings.units:
             raise ValueError("Adapter units must match settings")
-        self.cal, self.s, self.backend = calibration, settings, backend
+        self.s, self.backend = settings, backend
         self.measurement = measurement if measurement is not None else partial(
-            measure, config=Config(**settings.evaluator), centroid_percentile=settings.centroid_percentile)
+            measure, config=Config(**settings.evaluator))
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         # Exclusive creation keeps a previous trajectory from being overwritten.
@@ -179,7 +166,7 @@ class Controller:
         self.length_scales = np.asarray(settings.gp_length_scale, float)
         self.rng = np.random.default_rng(settings.seed)
         self.replay = isinstance(backend, Replay)
-        self.record("start", calibration=calibration, settings=asdict(settings), replay=self.replay)
+        self.record("start", settings=asdict(settings), replay=self.replay)
 
     def record(self, event, **data):
         record = {"time": datetime.now(timezone.utc).isoformat(), "event": event, **data}
@@ -213,24 +200,7 @@ class Controller:
         return actual
 
     def return_to_best(self, observation):
-        target = np.asarray(observation["position"], float)
-        if self.replay:
-            # Retrace measured waypoints, which are available in exact-grid replay.
-            waypoints = [o["position"] for o in reversed(self.history)
-                         if o["acquisition"] >= observation["acquisition"]]
-            for waypoint in waypoints:
-                self.move(waypoint, "Return along measured path to final position.", "transit")
-        else:
-            distance = np.linalg.norm(target - self.position())
-            while distance > self.s.max_step:
-                before = self.position()
-                waypoint = before + (target - before) * (self.s.max_step / distance)
-                actual = self.move(waypoint, "Bounded transit to final position.", "transit")
-                remaining = np.linalg.norm(target - actual)
-                if remaining >= distance:
-                    raise RuntimeError("Final transit made no progress")
-                distance = remaining
-            self.move(target, "Return to best observed position for confirmation.", "transit")
+        self.travel_to(observation["position"])
 
     def best_observed(self, bo_started):
         metric = "secondary_metric" if bo_started else "primary_metric"
@@ -249,7 +219,7 @@ class Controller:
         after = self.position()
         if np.linalg.norm(after - actual) > self.s.readback_tolerance:
             raise RuntimeError("Motor position changed during acquisition")
-        obs = self.measurement(image, self.cal)
+        obs = self.measurement(image)
         obs.update(position=after.tolist(), target=target.tolist(), stage=stage,
                    acquisition=self.acquisitions)
         m = obs["metrics"]
@@ -257,7 +227,7 @@ class Controller:
             f"{'valid' if m['valid'] else 'invalid'}; "
             f"inner/outer coverage={m.get('inner_coverage', 0):.3f}/{m.get('outer_coverage', 0):.3f}; "
             f"M1={float(m['primary_metric']):.5g}, hole integral M2={float(m['secondary_metric']):.6g}; "
-            f"centroid error={obs['error']}. Reasons: {', '.join(m['reasons']) or 'none'}.")
+            f"Reasons: {', '.join(m['reasons']) or 'none'}.")
         if m.get("fit") is not None:
             description += (f" Unsupported arcs reach {m.get('inner_max_gap_degrees', float('nan')):.1f}"
                             f" degrees inside and {m.get('outer_max_gap_degrees', float('nan')):.1f} outside."
@@ -271,7 +241,7 @@ class Controller:
             old = self.current["metrics"]
             trend = (f"Previous M1={float(old['primary_metric']):.5g}, "
                      f"M2={float(old['secondary_metric']):.6g}; "
-                     f"geometry {'improved' if geometry(obs) < geometry(self.current) else 'unchanged or worse'}.")
+                     f"M1 {'improved' if float(m['primary_metric']) < float(old['primary_metric']) else 'unchanged or worse'}.")
         eligible = feasible(obs, self.s)
         if not m["valid"]:
             rejection = "invalid fit"
@@ -302,13 +272,13 @@ class Controller:
             lo = np.maximum(bounds[:, 0], p - self.s.bo_halfwidth)
             hi = np.minimum(bounds[:, 1], p + self.s.bo_halfwidth)
             pool = self.rng.uniform(lo, hi, (self.s.bo_candidates, 2))
-        delta = pool - self.position()
-        allowed = (np.all((pool >= bounds[:, 0]) & (pool <= bounds[:, 1]), axis=1)
-                   & (np.linalg.norm(delta, axis=1) <= self.s.max_step + 1e-9)
-                   & (np.linalg.norm(delta, axis=1) >= self.s.min_step - 1e-9))
+        allowed = np.all((pool >= bounds[:, 0]) & (pool <= bounds[:, 1]), axis=1)
+        distance = np.linalg.norm(pool - self.position(), axis=1)
+        allowed &= ((distance <= self.s.max_step + 1e-9)
+                    & (distance >= self.s.min_step - 1e-9))
         allowed &= np.all(np.abs(pool - p) <= np.asarray(self.s.bo_halfwidth) + 1e-9, axis=1)
         pool = pool[allowed]
-        if len(pool):
+        if len(pool) and self.history:
             seen = np.array([o["position"] for o in self.history])
             pool = pool[np.min(np.linalg.norm(pool[:, None] - seen[None, :], axis=2), axis=1)
                         >= self.s.min_step * 0.5]
@@ -319,144 +289,145 @@ class Controller:
             pool = pool[np.all(np.sum(offsets ** 2, axis=2) > 1., axis=1)]
         return pool
 
-    def direction(self, observation):
-        e, m = observation["error"], observation["metrics"]
-        fit = m.get("fit")
-        if e is None or fit is None:
-            return None
-        if (not np.isfinite(e).all() or np.linalg.norm(e) <= 0
-            or np.linalg.norm(e) < self.s.min_vector
-            or min(m["inner_coverage"], m["outer_coverage"]) < self.s.min_coverage):
-            return None
-        eta = self.cal["eta"] if self.s.eta is None else self.s.eta
-        d = -eta * np.linalg.solve(np.asarray(self.cal["jacobian"]), e)
-        length = np.linalg.norm(d)
-        return d * (np.clip(length, self.s.min_step, self.s.max_step) / length)
-
-    def coarse_trial(self, incumbent, displacement):
-        """Shorten the vector at travel bounds without rotating it."""
-        p = np.asarray(incumbent["position"], float)
+    def stage1_candidates(self):
+        """Propose throughout the global bounds without geometry exclusions."""
         bounds = np.asarray(self.s.bounds)
-        scale = 1.
-        for i, value in enumerate(displacement):
-            if value > 0:
-                scale = min(scale, (bounds[i, 1] - p[i]) / value)
-            elif value < 0:
-                scale = min(scale, (bounds[i, 0] - p[i]) / value)
-        delta = displacement * scale
-        target = p + delta
-        length = np.linalg.norm(delta)
-        if length < self.s.min_step - 1e-9:
-            return None
-        if hasattr(self.backend, "candidate_positions"):
-            # Replay quantizes the vector to available measurements in its forward half-plane.
-            pool = np.asarray(self.backend.candidate_positions, float)
-            offsets = pool - p
-            distances = np.linalg.norm(offsets, axis=1)
-            allowed = (np.all((pool >= bounds[:, 0]) & (pool <= bounds[:, 1]), axis=1)
-                       & (distances >= self.s.min_step - 1e-9)
-                       & (distances <= length + 1e-9) & (offsets @ delta > 0))
-            pool = pool[allowed]
-            if not len(pool):
-                return None
-            target = pool[np.argmin(np.linalg.norm(pool - target, axis=1))]
-        return target
+        pool = (np.asarray(self.backend.candidate_positions, float)
+                if hasattr(self.backend, "candidate_positions") else
+                self.rng.uniform(bounds[:, 0], bounds[:, 1], (self.s.bo_candidates, 2)))
+        allowed = np.all((pool >= bounds[:, 0]) & (pool <= bounds[:, 1]), axis=1)
+        pool = pool[allowed]
+        if len(pool) and self.history:
+            seen = np.array([o["position"] for o in self.history])
+            pool = pool[np.min(np.linalg.norm(pool[:, None] - seen[None, :], axis=2), axis=1)
+                        >= self.s.min_step]
+        if self.replay and len(pool):
+            reachable, _ = self.replay_routes()
+            pool = pool[[tuple(p) in reachable for p in pool]]
+        return pool
+
+    def replay_routes(self):
+        """Find recorded waypoints reachable by moves no longer than max_step."""
+        bounds = np.asarray(self.s.bounds)
+        points = np.asarray(self.backend.candidate_positions, float)
+        points = points[np.all((points >= bounds[:, 0]) & (points <= bounds[:, 1]), axis=1)]
+        start = tuple(self.position())
+        parents, queue = {start: None}, [start]
+        for point in queue:
+            distances = np.linalg.norm(points - point, axis=1)
+            for neighbor in points[distances <= self.s.max_step + 1e-9]:
+                key = tuple(neighbor)
+                if key not in parents:
+                    parents[key] = point
+                    queue.append(key)
+        return parents.keys(), parents
+
+    def travel_to(self, target):
+        """Reach a global BO target using bounded transit moves without images."""
+        target = np.asarray(target, float)
+        if self.replay:
+            _, parents = self.replay_routes()
+            key, path = tuple(target), []
+            if key not in parents:
+                raise RuntimeError("No bounded replay path to target")
+            while parents[key] is not None:
+                path.append(key)
+                key = parents[key]
+            for waypoint in reversed(path):
+                self.move(waypoint, "Bounded replay transit to BO target.", "transit")
+        else:
+            distance = np.linalg.norm(target - self.position())
+            while distance > self.s.max_step:
+                before = self.position()
+                waypoint = before + (target - before) * (self.s.max_step / distance)
+                actual = self.move(waypoint, "Bounded transit to BO target.", "transit")
+                remaining = np.linalg.norm(target - actual)
+                if remaining >= distance:
+                    raise RuntimeError("Transit made no progress")
+                distance = remaining
+            self.move(target, "Reach BO target.", "transit")
 
     def run(self):
         incumbent, reason, status = None, "budget exhausted", "best_found"
         bo_started = False
         try:
             incumbent = self.acquire(self.position(), "Acquire baseline before choosing a move.", "baseline")
-            stage = "coarse"
-            failures, ceiling, confirmed = 0, self.s.max_step, 1
-            initial_samples = 0
+            stage, initial_samples = "stage1", 0
             while self.acquisitions < self.s.max_acquisitions - self.s.confirmations:
-                if stage == "coarse" and self.acquisitions >= self.s.max_acquisitions - self.s.confirmations - 1:
-                    break
-                if stage == "bo":
-                    incumbent = self.best
-                good = feasible(incumbent, self.s)
-                target_met = good and self.s.target_m2 is not None and float(
-                    incumbent["metrics"]["secondary_metric"]) <= self.s.target_m2
-                if target_met:
+                primary_best = self.best_observed(False)
+                if stage == "stage1":
+                    threshold_met = float(primary_best["metrics"]["primary_metric"]) <= self.s.bo_stage_entrance_m1
+                    budget_met = self.acquisitions >= self.s.stage1_max_acquisitions
+                    if threshold_met or budget_met:
+                        stage, bo_started = "bo", True
+                        self.record("stage_transition", stage="bo", from_stage="stage1",
+                                    reason="M1 threshold reached" if threshold_met else "stage 1 budget exhausted",
+                                    stage1_acquisitions=self.acquisitions)
+                if stage == "stage1":
+                    gp, fitted = fit_objective(self.history, self.s, "primary_metric")
+                    self.record("bo_model", stage=stage, objective="primary_metric",
+                                length_scales=np.asarray(gp.kernel_.length_scale).tolist(),
+                                length_scales_fitted=fitted, training_count=len(gp.X_train_),
+                                training_acquisitions=[o["acquisition"] for o in self.history],
+                                exclusion_acquisitions=[])
+                    pool = self.stage1_candidates()
+                    if not len(pool):
+                        # A discrete or very small domain can be fully sampled before the budget.
+                        trial = np.asarray(primary_best["position"])
+                        plan, acquisition_stage = "Reimage best M1 after exhausting distinct Stage 1 candidates.", "stage1"
+                    elif self.acquisitions < self.s.bo_initial_samples:
+                        trial = pool[self.rng.integers(len(pool))]
+                        plan, acquisition_stage = "Random global M1 initialization.", "stage1_init"
+                    else:
+                        scores = expected_improvement(gp, pool, float(primary_best["metrics"]["primary_metric"]), self.s)
+                        trial = pool[np.argmax(scores)]
+                        plan, acquisition_stage = f"Global M1 BO trial; EI={scores.max():.5g}.", "stage1"
+                    self.travel_to(trial)
+                    self.acquire(trial, plan, acquisition_stage)
+                    continue
+
+                # Stage 2 can start on budget exhaustion before any eligible M2 exists.
+                incumbent = self.best or primary_best
+                if (self.best is not None and self.s.target_m2 is not None
+                    and float(self.best["metrics"]["secondary_metric"]) <= self.s.target_m2):
                     reason = "requested metric target reached"
                     break
-                if good and stage == "coarse":
-                    if confirmed < self.s.confirmations:
-                        incumbent = self.acquire(incumbent["position"], "Confirm geometry before local BO.", "confirm")
-                        confirmed = confirmed + 1 if feasible(incumbent, self.s) else 0
-                        continue
-                    stage = "bo"
-                    bo_started = True
-                if stage == "bo":
-                    incumbent = self.best
+                gp = None
+                if self.best is not None:
                     gp, fitted = fit_objective(self.history, self.s)
                     self.length_scales = np.asarray(gp.kernel_.length_scale)
-                    self.record("bo_model", length_scales=self.length_scales.tolist(),
+                    self.record("bo_model", stage="bo", objective="secondary_metric",
+                                length_scales=self.length_scales.tolist(),
                                 length_scales_fitted=fitted, training_count=len(gp.X_train_),
                                 training_acquisitions=[o["acquisition"] for o in self.history if feasible(o, self.s)],
                                 initial_samples=initial_samples,
                                 exclusion_acquisitions=[o["acquisition"] for o in self.history
                                     if not eligible_geometry(o, self.s)])
-                    pool = self.candidates(incumbent)
-                    if not len(pool):
-                        reason = "no sampleable candidates after travel, spacing, and M1 exclusions"
-                        if initial_samples < self.s.bo_initial_samples:
-                            reason += "; random initialization incomplete"
-                        break
-                    if initial_samples < self.s.bo_initial_samples:
-                        trial = pool[self.rng.integers(len(pool))]
-                        plan = f"Random BO initialization {initial_samples + 1}/{self.s.bo_initial_samples} eligible locations."
-                        acquisition_stage = "bo_init"
-                    else:
-                        scores = expected_improvement(gp, pool, float(incumbent["metrics"]["secondary_metric"]), self.s)
-                        if scores.max() <= self.s.min_ei:
-                            reason = "expected improvement below threshold"
-                            break
-                        trial = pool[np.argmax(scores)]
-                        plan = f"Local BO trial at {trial.tolist()}; EI={scores.max():.5g}."
-                        acquisition_stage = "bo"
-                    obs = self.acquire(trial, plan, acquisition_stage)
-                    if acquisition_stage == "bo_init" and feasible(obs, self.s):
-                        initial_samples += 1
-                    continue
+                initializing = initial_samples < self.s.bo_initial_samples or gp is None
+                pool = self.candidates(incumbent)
+                if not len(pool):
+                    reason = "no sampleable candidates after travel, spacing, and M1 exclusions"
+                    if initial_samples < self.s.bo_initial_samples or gp is None:
+                        reason += "; random initialization incomplete"
+                    break
+                if initializing:
+                    trial = pool[self.rng.integers(len(pool))]
+                    plan = f"Random M2 BO initialization {initial_samples + 1}/{self.s.bo_initial_samples} eligible locations."
+                    acquisition_stage = "bo_init"
                 else:
-                    correction = self.direction(incumbent)
-                    if correction is None:
-                        probes = np.array([[1., 1.], [-1., -1.], [1., -1.], [-1., 1.]]) / np.sqrt(2)
-                        attempts, step = len(probes), ceiling
-                        displacement = probes[failures % attempts] * step
-                        source = "Centroid confidence insufficient; bounded 2D probe"
-                    else:
-                        attempts = 2
-                        step = min(np.linalg.norm(correction), ceiling)
-                        displacement = correction * (step / np.linalg.norm(correction))
-                        if failures % attempts:
-                            displacement = -displacement
-                        source = "Calibrated centroid correction" if failures % attempts == 0 else "Reverse correction probe"
-                    trial = self.coarse_trial(incumbent, displacement)
-                    plan = f"{source}, displacement={displacement.tolist()}; seek lower geometry error."
-                if trial is not None:
-                    obs = self.acquire(trial, plan, stage)
-                    accepted = (feasible(obs, self.s) or
-                                geometry(obs) < geometry(incumbent) - self.s.geometry_improvement)
-                    if accepted:
-                        incumbent, confirmed = obs, 1
-                        failures, ceiling = 0, self.s.max_step
-                        continue
-                    incumbent = self.acquire(incumbent["position"], "Trial did not improve the objective; restore and verify incumbent.", "restore")
-                    confirmed = 1
-                if stage == "coarse":
-                    failures += 1
-                    if failures >= attempts:
-                        failures = 0
-                        ceiling = step / 2
-                        if ceiling < self.s.min_step:
-                            reason = "coarse vector search exhausted at minimum step"
-                            break
+                    scores = expected_improvement(gp, pool, float(incumbent["metrics"]["secondary_metric"]), self.s)
+                    if scores.max() <= self.s.min_ei:
+                        reason = "expected improvement below threshold"
+                        break
+                    trial = pool[np.argmax(scores)]
+                    plan = f"Local M2 BO trial at {trial.tolist()}; EI={scores.max():.5g}."
+                    acquisition_stage = "bo"
+                obs = self.acquire(trial, plan, acquisition_stage)
+                if acquisition_stage == "bo_init" and feasible(obs, self.s):
+                    initial_samples += 1
             if stage == "bo" and initial_samples < self.s.bo_initial_samples and reason == "budget exhausted":
                 reason = "random initialization budget exhausted"
-            incumbent = self.best_observed(bo_started) or incumbent
+            incumbent = self.best_observed(bo_started) or self.best_observed(False) or incumbent
             self.return_to_best(incumbent)
             # Final repeated acquisitions count toward the same budget.
             confirmations = []
@@ -477,7 +448,7 @@ class Controller:
         except Exception as exc:
             status, reason = "blocked", f"{type(exc).__name__}: {exc}"
             self.record("fault", text=reason)
-        best = self.best_observed(bo_started)
+        best = self.best_observed(bo_started) or self.best_observed(False)
         try:
             final_position = self.position().tolist()
         except Exception:
@@ -493,7 +464,6 @@ class Controller:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--calibration", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True, help="JSON Settings object")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--manifest", type=Path, help="Replay recorded positions without interpolation")
@@ -507,9 +477,8 @@ def main():
     args = parser.parse_args()
     if not 0 <= args.webui_port <= 65535:
         parser.error("--webui-port must be between 0 and 65535")
-    calibration = json.loads(args.calibration.read_text())
     settings = Settings(**json.loads(args.config.read_text()))
-    settings.validate(calibration)
+    settings.validate()
     if args.manifest:
         if args.start is None:
             parser.error("Replay requires --start X Y")
@@ -520,7 +489,7 @@ def main():
         module, factory = args.adapter.split(":", 1)
         options = json.loads(args.adapter_config.read_text()) if args.adapter_config else {}
         backend = getattr(importlib.import_module(module), factory)(options)
-    controller = Controller(calibration, settings, backend, args.log)
+    controller = Controller(settings, backend, args.log)
     dashboard = None
     if args.webui:
         from alignment_webui import Dashboard
