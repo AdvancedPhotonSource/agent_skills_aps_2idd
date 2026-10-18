@@ -753,3 +753,25 @@ def test_tolerated_boundary_readbacks_survive_baseline_reimages_and_final_return
         np.testing.assert_array_equal(obs['position'], np.array(point) + side * .0005)
     assert all(np.all(np.abs(after) <= 15) for _, after in backend.moves)
     np.testing.assert_array_equal(result['final_readback'], np.array(point) + side * .0005)
+
+
+@pytest.mark.parametrize('options', [dict(min_step=-1), dict(min_step=6, max_step=5),
+                                    dict(min_step=float('nan')), dict(min_step=float('inf')),
+                                    dict(max_step=0), dict(max_step=-1)])
+def test_invalid_step_settings_explain_the_requirement(options):
+    with pytest.raises(ValueError, match='0 <= min_step <= max_step'):
+        settings(**options).validate()
+
+
+@pytest.mark.parametrize('stage', [1, 2])
+@pytest.mark.parametrize('initial', [False, True])
+def test_zero_min_step_allows_close_samples_but_excludes_measured_positions(tmp_path, stage, initial):
+    backend = SyntheticBackend([0, 0])
+    backend.candidate_positions = np.array([[0, 0], [.00001, 0], [1, 0], [10, 0]])
+    c = Controller(settings(min_step=0, max_step=5, bo_halfwidth=[15, 15]),
+                   backend, tmp_path / 'log')
+    baseline = observation([0, 0])
+    c.history = [baseline, observation([1, 0])]
+    pool = c.stage1_candidates(initial=initial) if stage == 1 else c.candidates(baseline, initial=initial)
+    expected = [[.00001, 0], [10, 0]] if stage == 1 or initial else [[.00001, 0]]
+    np.testing.assert_array_equal(pool, expected)

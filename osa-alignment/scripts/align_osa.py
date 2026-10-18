@@ -45,13 +45,15 @@ class Settings:
 
     def validate(self):
         bounds = np.asarray(self.bounds, float)
+        if (not np.isfinite([self.min_step, self.max_step]).all()
+            or self.max_step <= 0 or not 0 <= self.min_step <= self.max_step):
+            raise ValueError("Require max_step > 0 and 0 <= min_step <= max_step")
         numbers = [self.max_step, self.min_step, self.bo_stage_entrance_m1,
                    self.readback_tolerance,
                    *self.bo_halfwidth, *self.gp_length_scale, *self.gp_length_scale_bounds, self.gp_noise, self.ei_xi, self.min_ei,
                    self.gp_stage1_noise_multiplier]
         if (bounds.shape != (2, 2) or not np.isfinite(bounds).all()
             or np.any(bounds[:, 0] >= bounds[:, 1]) or not np.isfinite(numbers).all()
-            or not 0 < self.min_step <= self.max_step
             or not 0 < self.bo_stage_entrance_m1
             or min(self.bo_halfwidth) <= 0 or len(self.bo_halfwidth) != 2
             or min(self.gp_length_scale) <= 0 or len(self.gp_length_scale) != 2
@@ -278,13 +280,13 @@ class Controller:
         if not initial:
             distance = np.linalg.norm(pool - self.position(), axis=1)
             allowed &= ((distance <= self.s.max_step + 1e-9)
-                        & (distance >= self.s.min_step - 1e-9))
+                        & (distance >= max(1e-9, self.s.min_step - 1e-9)))
         allowed &= np.all(np.abs(pool - p) <= np.asarray(self.s.bo_halfwidth) + 1e-9, axis=1)
         pool = pool[allowed]
         if len(pool) and self.history:
             seen = np.array([o["position"] for o in self.history])
             pool = pool[np.min(np.linalg.norm(pool[:, None] - seen[None, :], axis=2), axis=1)
-                        >= (1e-9 if initial else self.s.min_step * 0.5)]
+                        >= (1e-9 if initial else max(1e-9, self.s.min_step * 0.5))]
         rejected = [o["position"] for o in self.history
                     if not eligible_geometry(o, self.s)]
         if len(pool) and rejected:
@@ -303,7 +305,7 @@ class Controller:
         if len(pool) and self.history:
             seen = np.array([o["position"] for o in self.history])
             pool = pool[np.min(np.linalg.norm(pool[:, None] - seen[None, :], axis=2), axis=1)
-                        >= (1e-9 if initial else self.s.min_step)]
+                        >= (1e-9 if initial else max(1e-9, self.s.min_step))]
         if not initial and self.replay and len(pool):
             reachable, _ = self.replay_routes()
             pool = pool[[tuple(p) in reachable for p in pool]]

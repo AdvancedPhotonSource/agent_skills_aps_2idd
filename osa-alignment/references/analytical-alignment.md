@@ -88,7 +88,7 @@ motor units and limits that must be replaced with appropriate local values:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `units`, `bounds`, `max_step` | required | Adapter units, `[x_min,x_max]` and `[y_min,y_max]`, maximum Euclidean displacement for moves after random initialization, including final transit |
-| `min_step` | 0.5 | Smallest trial displacement/spacing after random initialization, in motor units |
+| `min_step` | 0.5 | Smallest trial displacement/spacing after random initialization, in motor units; 0 disables minimum spacing while still excluding repeated positions |
 | `evaluator` | `{}` | Current-run evaluator options; omit semiaxes to fit them per image, or supply both to fix them |
 | `bo_stage_entrance_m1` | 0.02 | M1 threshold for Stage 2 entry and M2 observation eligibility |
 | `stage1_max_acquisitions` | 15 | Stage 1 acquisition budget, including baseline; positive integer leaving at least one Stage 2 acquisition plus final confirmations |
