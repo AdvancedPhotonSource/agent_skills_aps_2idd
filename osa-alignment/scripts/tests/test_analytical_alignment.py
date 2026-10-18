@@ -10,7 +10,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from alignment_io import measure
 from align_osa import Controller, Replay, Settings, fit_objective, expected_improvement, feasible
-from evaluate_alignment import Config
+from evaluate_alignment import Config, evaluate
 
 
 def observation(position, *, invalid=False):
@@ -550,6 +550,32 @@ def ring_image():
     y, x = np.indices((100, 100))
     r = np.hypot(x - 50, y - 50)
     return np.where((r >= 12) & (r <= 30), 100., 0.)
+
+
+def test_min_eccentricity_constrains_both_fitted_boundaries():
+    image = ring_image()
+    free = evaluate(image)
+    constrained = evaluate(image, Config(min_eccentricity=0.6))
+    assert free['fit'] is not None and constrained['fit'] is not None
+    for boundary in ('inner', 'outer'):
+        free_axes = free['fit'][f'{boundary}_axes']
+        axes = constrained['fit'][f'{boundary}_axes']
+        free_eccentricity = np.sqrt(1 - (min(free_axes) / max(free_axes)) ** 2)
+        eccentricity = np.sqrt(1 - (min(axes) / max(axes)) ** 2)
+        assert free_eccentricity < 0.6
+        assert eccentricity >= 0.6 - 1e-10
+    assert np.all(np.array(constrained['fit']['inner_axes']) < constrained['fit']['outer_axes'])
+
+
+@pytest.mark.parametrize('value', [-0.1, 1, float('nan'), float('inf')])
+def test_min_eccentricity_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match='min_eccentricity'):
+        Config(min_eccentricity=value).validate()
+
+
+def test_min_eccentricity_rejects_incompatible_fixed_axes():
+    with pytest.raises(ValueError, match='Fixed axes'):
+        Config(inner_axes=(12, 12), outer_axes=(30, 20), min_eccentricity=0.5).validate()
 
 
 def test_nonconvergent_optimizer_returns_finite_m1_from_returned_geometry(monkeypatch):

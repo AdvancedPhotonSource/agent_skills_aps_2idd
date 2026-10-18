@@ -28,6 +28,10 @@ across an alignment sequence. The example dimensions are illustrative. These are
 semiaxis lengths in pixels, not diameters; corresponding inner semiaxes must be
 smaller than the outer ones. `angle_degrees` describes the A-axis clockwise from
 image +x toward image +y, modulo 180°. A and B need not be ordered by length.
+Use `--min-eccentricity E` (or `evaluator.min_eccentricity` in the controller
+configuration) to require both ellipses to satisfy \(c/a\ge E\), with
+\(c=\sqrt{a^2-b^2}\), \(a\) the larger semiaxis, and \(0\le E<1\). Omit it to
+fit without this bound. Fixed axes must already satisfy the bound.
 The fit uses ellipse normals to classify edges and integrates the elliptical
 hole. Nearly circular ellipses have poorly determined orientation. Extra shape
 freedom can absorb actual misalignment, so inspect fitted aspect ratios and the

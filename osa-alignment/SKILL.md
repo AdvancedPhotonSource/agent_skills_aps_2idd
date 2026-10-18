@@ -79,7 +79,9 @@ uv run --project scripts --locked python scripts/evaluate_alignment.py IMAGE --o
 ```
 
 Supply both `--inner-axes A B` and `--outer-axes A B` to fix semiaxes in pixels;
-otherwise they are fitted. See [metric details](references/analytical-alignment.md#quantitative-evaluation)
+otherwise they are fitted. Add `--min-eccentricity E` to require both ellipses to
+have focal-distance-to-major-semiaxis ratio \(c/a\ge E\), where \(0\le E<1\).
+Omit it for an unconstrained fit. See [metric details](references/analytical-alignment.md#quantitative-evaluation)
 for normalization, fit diagnostics, and options. 
 **Supply the best guess of the semiaxes whenever possible as they are important for accurate fitting**.
 

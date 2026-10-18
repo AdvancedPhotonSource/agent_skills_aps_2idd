@@ -25,6 +25,7 @@ from skimage.transform import hough_circle, hough_circle_peaks, resize
 class Config:
     inner_axes: tuple[float, float] | None = None
     outer_axes: tuple[float, float] | None = None
+    min_eccentricity: float | None = None
     sigma: float = 2.0
     edge_low: float = 0.04
     edge_high: float = 0.10
@@ -36,6 +37,9 @@ class Config:
     intensity_normalizer: float = 1.0
 
     def validate(self):
+        if self.min_eccentricity is not None:
+            if not np.isfinite(self.min_eccentricity) or not 0 <= self.min_eccentricity < 1:
+                raise ValueError("min_eccentricity must be finite and in [0, 1)")
         if (self.inner_axes is None) != (self.outer_axes is None):
             raise ValueError("Supply both inner_axes and outer_axes, or neither")
         if self.inner_axes is not None:
@@ -43,6 +47,11 @@ class Config:
                 or not np.isfinite([*self.inner_axes, *self.outer_axes]).all()
                 or not all(0 < i < o for i, o in zip(self.inner_axes, self.outer_axes))):
                 raise ValueError("Supply two positive semiaxes per ellipse, with each inner axis < outer axis")
+            if self.min_eccentricity is not None:
+                for axes in (self.inner_axes, self.outer_axes):
+                    ratio = min(axes) / max(axes)
+                    if ratio > np.sqrt(1 - self.min_eccentricity**2):
+                        raise ValueError("Fixed axes do not meet min_eccentricity")
         if not (np.isfinite(self.sigma) and self.sigma > 0):
             raise ValueError("sigma must be positive and finite")
         if not 0 < self.edge_low < self.edge_high <= 1:
@@ -141,6 +150,8 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
     """
     config = config or Config()
     config.validate()
+    max_axis_ratio = (None if config.min_eccentricity is None else
+                      float(np.sqrt(1 - config.min_eccentricity**2)))
     image = grayscale(image)
     height, width = image.shape
     result = dict(valid=False, reasons=[], config=asdict(config),
@@ -212,6 +223,12 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
             if config.inner_axes is not None:
                 inner_axes, outer_axes = config.inner_axes, config.outer_axes
                 theta = parameters[2]
+            elif max_axis_ratio is not None and config.min_eccentricity > 0:
+                fraction_a, fraction_b, a, axis_ratio, theta = parameters[2:]
+                b = a * axis_ratio
+                inner_a = fraction_a * a
+                inner_b = fraction_b * min(0.70 * b, max_axis_ratio * inner_a)
+                inner_axes, outer_axes = (inner_a, inner_b), (a, b)
             else:
                 fraction_a, fraction_b, a, b, theta = parameters[2:]
                 inner_axes, outer_axes = (fraction_a * a, fraction_b * b), (a, b)
@@ -242,10 +259,22 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
             inner = trial_radii[np.argmin(costs)]
             # Fractions enforce nesting for every angle throughout fitting.
             fraction = float(np.clip(inner / radius, 0.11, 0.69))
-            initial = [cx, cy, fraction, fraction,
-                       radius * np.sqrt(seed_ratio), radius / np.sqrt(seed_ratio), seed_angle]
-            lower += [0.10, 0.10, radius * 0.55, radius * 0.55, -np.pi]
-            upper += [0.70, 0.70, radius * 1.65, radius * 1.65, 2 * np.pi]
+            if max_axis_ratio is not None and config.min_eccentricity > 0:
+                # Parameterize both minor axes so the bound holds at every
+                # optimizer step, including nonconvergent fits.
+                a = radius * np.sqrt(seed_ratio)
+                axis_ratio = min(1 / seed_ratio, max_axis_ratio)
+                b = a * axis_ratio
+                inner_cap = min(0.70 * b, max_axis_ratio * fraction * a)
+                fraction_b = min(0.99, fraction * b / inner_cap)
+                initial = [cx, cy, fraction, fraction_b, a, axis_ratio, seed_angle]
+                lower += [0.10, 0.01, radius * 0.55, min(0.001, max_axis_ratio / 2), -np.pi]
+                upper += [0.70, 1.0, radius * 1.65, max_axis_ratio, 2 * np.pi]
+            else:
+                initial = [cx, cy, fraction, fraction,
+                           radius * np.sqrt(seed_ratio), radius / np.sqrt(seed_ratio), seed_angle]
+                lower += [0.10, 0.10, radius * 0.55, radius * 0.55, -np.pi]
+                upper += [0.70, 0.70, radius * 1.65, radius * 1.65, 2 * np.pi]
         fit = least_squares(residuals, initial, bounds=(lower, upper),
                             diff_step=1e-3, max_nfev=150)
         # Update edge-normal classification at the fitted center and refine.
@@ -333,6 +362,7 @@ def main():
     parser.add_argument("--output", type=Path, help="JSON destination; default stdout")
     parser.add_argument("--inner-axes", type=float, nargs=2, metavar=("A", "B"), help="Fixed inner ellipse semiaxes in pixels")
     parser.add_argument("--outer-axes", type=float, nargs=2, metavar=("A", "B"), help="Fixed outer ellipse semiaxes in pixels; requires inner axes")
+    parser.add_argument("--min-eccentricity", type=float, help="Minimum c/a for both fitted ellipses; 0 allows circles")
     parser.add_argument("--sigma", type=float, default=2.0, help="Canny smoothing sigma in pixels")
     parser.add_argument("--edge-low", type=float, default=0.04)
     parser.add_argument("--edge-high", type=float, default=0.10)
