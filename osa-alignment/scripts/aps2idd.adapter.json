@@ -5,7 +5,8 @@
   "request_timeout": 20.0,
   "operation_timeout": 60.0,
   "motion_timeout": 30.0,
-  "acquisition_timeout": 6.0,
+  "acquisition_timeout": 20.0,
   "settle_time": 0.2,
-  "poll_interval": 0.2
+  "poll_interval": 0.2,
+  "post_call_sleep": 2.0
 }

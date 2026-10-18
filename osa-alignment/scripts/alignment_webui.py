@@ -9,9 +9,9 @@ from pathlib import Path
 from threading import Thread
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
-from evaluate_alignment import read_image
+from evaluate_alignment import boundary_points, read_image
 
 
 class Dashboard:
@@ -71,12 +71,28 @@ class Dashboard:
                 pixels = read_image(state["observations"][-1]["image"])
                 low, high = float(pixels.min()), float(pixels.max())
                 scaled = (pixels - low) / (high - low) if high > low else np.zeros_like(pixels)
-                preview = Image.fromarray(np.uint8(np.clip(scaled * 255, 0, 255)))
+                preview = Image.fromarray(np.uint8(np.clip(scaled * 255, 0, 255))).convert("RGB")
                 preview.thumbnail((1000, 1000))
+                metrics = state["observations"][-1]["metrics"]
+                fit = metrics.get("fit")
+                overlay_note = "No fitted ellipse available"
+                if fit and all(key in fit for key in (
+                    "center_x", "center_y", "angle_degrees", "inner_axes", "outer_axes"
+                )):
+                    draw = ImageDraw.Draw(preview)
+                    angles = np.linspace(0, 2 * np.pi, 721)
+                    sx, sy = preview.width / pixels.shape[1], preview.height / pixels.shape[0]
+                    for boundary, color in (("inner", "#00ffff"), ("outer", "#ff9900")):
+                        x, y = boundary_points(fit, boundary, angles)
+                        points = list(zip((x + .5) * sx - .5, (y + .5) * sy - .5))
+                        draw.line(points, fill=color, width=2)
+                    overlay_note = ("Ellipse overlay: inner cyan, outer orange; "
+                                    + ("valid fit" if metrics.get("valid") else "fit failed validation"))
                 buffer = BytesIO()
                 preview.save(buffer, format="PNG")
                 state["image"] = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
-                state["image_note"] = f"Display intensity range: {low:.5g}–{high:.5g} (linear)"
+                state["image_note"] = (f"Display intensity range: {low:.5g}–{high:.5g} (linear). "
+                                       + overlay_note)
             except (OSError, ValueError) as exc:
                 state["image_note"] = f"Image preview unavailable: {exc}"
         return state

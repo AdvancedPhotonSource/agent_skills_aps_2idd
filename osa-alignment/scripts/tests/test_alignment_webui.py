@@ -1,4 +1,6 @@
 """Dashboard integration checks; all acquisition uses a synthetic backend."""
+import base64
+from io import BytesIO
 import json
 from pathlib import Path
 import sys
@@ -114,3 +116,50 @@ def test_snapshot_escapes_log_content_and_preserves_existing_file(tmp_path):
     dashboard.start()
     dashboard.close()
     assert dashboard.snapshot_path.read_text() == "existing report"
+
+
+@pytest.mark.parametrize("size", [200, 2000])
+@pytest.mark.parametrize("valid", [True, False])
+def test_preview_overlays_rotated_ellipses_at_thumbnail_scale(tmp_path, size, valid):
+    image = tmp_path / "detector.tif"
+    Image.fromarray(np.zeros((size, size), dtype=np.uint8)).save(image)
+    fit = dict(center_x=size / 2, center_y=size / 2, angle_degrees=90,
+               inner_axes=[size / 10, size / 20], outer_axes=[size / 5, size / 10])
+    event = dict(event="observation", time="2026-10-18T00:00:00Z",
+                 observation=dict(image=str(image), metrics=dict(fit=fit, valid=valid)))
+    log = tmp_path / "run.jsonl"
+    log.write_text(json.dumps(event) + "\n")
+    dashboard = Dashboard(log, port=0)
+    dashboard.start()
+    try:
+        state = json.load(request(dashboard))
+        preview = Image.open(BytesIO(base64.b64decode(state["image"].split(",", 1)[1])))
+        scale = preview.width / size
+        center = (size / 2 + .5) * scale - .5
+        # At 90 degrees the long semiaxis runs down the image, not rightward.
+        for radius, color in [(size / 10, (0, 255, 255)), (size / 5, (255, 153, 0))]:
+            x, y = round(center), round(center + radius * scale)
+            patch = np.asarray(preview)[y - 2:y + 3, x - 2:x + 3]
+            assert np.any(np.all(patch == color, axis=-1))
+        assert preview.getpixel((round(center), round(center))) == (0, 0, 0)
+        assert ("valid fit" if valid else "fit failed validation") in state["image_note"]
+        assert "inner cyan, outer orange" in state["image_note"]
+    finally:
+        dashboard.close()
+    assert state["image"] in dashboard.snapshot_path.read_text()
+
+
+def test_preview_without_fitted_geometry(tmp_path):
+    image = tmp_path / "detector.tif"
+    Image.fromarray(np.zeros((20, 20), dtype=np.uint8)).save(image)
+    log = tmp_path / "run.jsonl"
+    log.write_text(json.dumps(dict(event="observation", time="2026-10-18T00:00:00Z",
+        observation=dict(image=str(image), metrics=dict(fit=None, valid=False)))) + "\n")
+    dashboard = Dashboard(log, port=0)
+    dashboard.start()
+    try:
+        state = json.load(request(dashboard))
+        assert state["image"].startswith("data:image/png;base64,")
+        assert "No fitted ellipse available" in state["image_note"]
+    finally:
+        dashboard.close()
