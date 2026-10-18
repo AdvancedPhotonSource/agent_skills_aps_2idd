@@ -25,10 +25,12 @@ class APS2IDDAdapter:
         self.acquisition_timeout = float(config.get("acquisition_timeout", 6.))
         self.settle_time = float(config.get("settle_time", .2))
         self.poll_interval = float(config.get("poll_interval", .2))
+        # Optional dwell after every adapter call, for instruments that need recovery time.
+        self.post_call_sleep = float(config.get("post_call_sleep", 0.))
         positive = (self.request_timeout, self.operation_timeout, self.motion_timeout,
                     self.acquisition_timeout, self.poll_interval)
         if (not all(math.isfinite(v) and v > 0 for v in positive)
-            or not math.isfinite(self.settle_time) or self.settle_time < 0
+            or not all(math.isfinite(v) and v >= 0 for v in (self.settle_time, self.post_call_sleep))
             or self.operation_timeout <= max(self.motion_timeout + self.settle_time,
                                              self.acquisition_timeout)):
             raise ValueError("Require finite positive timeouts and an operation timeout longer than motion/acquisition")
@@ -53,6 +55,10 @@ class APS2IDDAdapter:
             raise RuntimeError(f"QueueServer request failed: {response.get('msg', response)}")
         return response
 
+    def _pause(self):
+        if self.post_call_sleep > 0:
+            time.sleep(self.post_call_sleep)
+
     def _wait(self, deadline, label):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -61,9 +67,12 @@ class APS2IDDAdapter:
 
     def _function(self, name, **kwargs):
         deadline = time.monotonic() + self.operation_timeout
+                
         response = self._checked(self.client.function_execute(
             dict(item_type="function", name=name, kwargs=kwargs),
             run_in_background=False, **self.identity))
+        if not response["success"]:
+            raise RuntimeError(response["msg"])
         uid = response["task_uid"]
         while True:
             response = self._checked(self.client.task_result(uid))
@@ -81,17 +90,20 @@ class APS2IDDAdapter:
         position = self._function("read_osa_position")
         if len(position) != 2 or not all(math.isfinite(float(v)) for v in position):
             raise RuntimeError("OSA readback must contain two finite coordinates")
+        self._pause()
         return [float(v) * 1000 for v in position]
 
     def move_absolute(self, position):
-        """Execute one move and wait for its successful history entry, including settling."""
+        """Execute one move and wait for its successful history entry, including settling.
+        Expected inputs are in micron. Values in sent requests are converted to mm.
+        """
         if len(position) != 2 or not all(math.isfinite(float(v)) for v in position):
             raise ValueError("OSA target must contain two finite coordinates")
         deadline = time.monotonic() + self.operation_timeout
         response = self._checked(self.client.item_execute(
             dict(item_type="plan", name="move_osa_absolute", kwargs=dict(
                 x_mm=float(position[0]) / 1000, y_mm=float(position[1]) / 1000,
-                timeout=self.motion_timeout, settle_time=self.settle_time)), **self.identity))
+            )), **self.identity))
         uid = response["item"]["item_uid"]
         while True:
             history = self._checked(self.client.history_get(reload=True))
@@ -100,6 +112,7 @@ class APS2IDDAdapter:
                     result = item["result"]
                     if result["exit_status"] != "completed":
                         raise RuntimeError(f"OSA move {uid} {result['exit_status']}: {result.get('msg', '')}")
+                    self._pause()
                     return
             status = self.client.status(reload=True)
             if status.get("manager_state") == "paused":
@@ -115,6 +128,7 @@ class APS2IDDAdapter:
         path = Path(result["img_path"])
         if not path.is_absolute() or not path.is_file():
             raise FileNotFoundError(f"X-eye image must be accessible through a shared absolute path: {path}")
+        self._pause()
         return str(path)
 
     def close(self):

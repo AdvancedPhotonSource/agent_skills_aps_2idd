@@ -442,6 +442,8 @@ statuses, and `acquisition_timeout` is passed to the camera helper.
 `operation_timeout` sets the polling deadline and must exceed motion plus settling
 and the acquisition timeout; in-flight requests have separate request timeouts.
 `settle_time` and `poll_interval` are in seconds, as are all timeouts.
+`post_call_sleep` is an optional dwell in seconds applied after every successful
+adapter call (read, move, and acquisition); it defaults to `0.0`, which disables it.
 
 ```sh
 uv run --project scripts --locked --group beamline python scripts/align_osa.py \

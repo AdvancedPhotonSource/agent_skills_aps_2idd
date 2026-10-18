@@ -43,6 +43,7 @@ def test_placeholder_rejected_before_client_creation():
 
 
 @pytest.mark.parametrize("option,value", [("motion_timeout", 0), ("settle_time", -1),
+                                         ("post_call_sleep", -1), ("post_call_sleep", float("nan")),
                                          ("request_timeout", float("inf")), ("operation_timeout", 20)])
 def test_invalid_timeouts(option, value, client):
     with pytest.raises(ValueError, match="timeout"):
@@ -136,6 +137,27 @@ def test_images_have_unique_names_and_accessible_paths(adapter, client, tmp_path
     calls = client.function_execute.call_args_list
     assert calls[0].args[0]["kwargs"]["filename"] != calls[1].args[0]["kwargs"]["filename"]
     assert calls[0].args[0]["kwargs"]["timeout"] == 6.
+
+
+def test_post_call_sleep_dwells_after_each_call(client, monkeypatch, tmp_path):
+    path = tmp_path / "snapshot.tiff"
+    path.touch()
+    adapter = APS2IDDAdapter(dict(url="http://offline.invalid:60610", poll_interval=.001,
+                                  post_call_sleep=.5), client=client)
+    sleeps = []
+    monkeypatch.setattr("aps2idd_adapter.time.sleep", sleeps.append)
+    client.task_result.side_effect = [task([1.25, -.003]), task(dict(success=True, img_path=str(path)))]
+    client.history_get.return_value = history()
+    adapter.read_position()
+    adapter.move_absolute([0, 0])
+    adapter.acquire_image()
+    assert sleeps == [.5, .5, .5]
+
+
+def test_post_call_sleep_defaults_to_no_dwell(adapter, client, monkeypatch):
+    monkeypatch.setattr("aps2idd_adapter.time.sleep", Mock(side_effect=AssertionError("unexpected sleep")))
+    client.task_result.return_value = task([1.25, -.003])
+    assert adapter.read_position() == [1250., -3.]
 
 
 @pytest.mark.parametrize("value,error", [
