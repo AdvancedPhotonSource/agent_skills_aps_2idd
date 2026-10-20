@@ -66,7 +66,7 @@ function plot(id, rows, metric, settings) {
     y: trajectory ? o.position[1] : o.metrics[metric], o}));
   const valid = points.filter(p => finite(p.x) && finite(p.y));
   if (!valid.length) { svg.append(node('text', {x: 230, y: 160, 'text-anchor': 'middle'}, 'Waiting for finite observations')); return; }
-  const threshold = metric === 'primary_metric' ? settings.bo_stage_entrance_m1 : null;
+  const threshold = metric === 'primary_metric' ? settings.stage_2_entrance_m1 : null;
   let xs = valid.map(p => p.x), ys = valid.map(p => p.y);
   if (!trajectory) xs = points.map(p => p.x);
   if (finite(threshold)) ys.push(threshold);

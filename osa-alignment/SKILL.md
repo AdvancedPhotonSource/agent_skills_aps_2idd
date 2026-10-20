@@ -124,7 +124,7 @@ a localized bright spot.
 [scripts/align_osa.py](scripts/align_osa.py) aligns the OSA in two stages.
 Stage 1 uses Bayesian optimization to minimize M1 across the full `bounds` in
 the alignment config, including finite scores from failed fits. It enters Stage 2
-as soon as either M1 meets `bo_stage_entrance_m1` or `stage1_max_acquisitions` is
+as soon as either M1 meets `stage_2_entrance_m1` or `stage_1_max_acquisitions` is
 used up. The baseline counts toward the Stage 1 budget. Stage 2 uses random
 initialization and local Bayesian optimization to minimize M2, retaining its
 M1 eligibility constraint and neighborhood exclusions. The final position is the

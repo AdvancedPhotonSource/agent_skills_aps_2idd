@@ -77,11 +77,11 @@ motor units and limits that must be replaced with appropriate local values:
   "bounds": [[-15, 15], [-15, 15]],
   "max_step": 5,
   "min_step": 0.5,
-  "bo_stage_entrance_m1": 0.02,
-  "stage1_max_acquisitions": 15,
+  "stage_2_entrance_m1": 0.02,
+  "stage_1_max_acquisitions": 15,
   "max_acquisitions": 40,
   "confirmations": 2,
-  "bo_halfwidth": [5, 5],
+  "stage_2_bo_halfwidth": [5, 5],
   "bo_initial_samples": 5,
   "gp_length_scale": [2.5, 2.5],
   "gp_length_scale_bounds": [0.5, 10],
@@ -94,21 +94,21 @@ motor units and limits that must be replaced with appropriate local values:
 | `units`, `bounds`, `max_step` | required | Adapter units, `[x_min,x_max]` and `[y_min,y_max]`, maximum Euclidean displacement for moves after random initialization, including final transit |
 | `min_step` | 0.5 | Smallest trial displacement/spacing after random initialization, in motor units; 0 disables minimum spacing while still excluding repeated positions |
 | `evaluator` | `{}` | Current-run evaluator options; omit semiaxes to fit them per image, or supply both to fix them |
-| `bo_stage_entrance_m1` | 0.02 | M1 threshold for Stage 2 entry and M2 observation eligibility |
-| `stage1_max_acquisitions` | 15 | Stage 1 acquisition budget, including baseline; positive integer leaving at least one Stage 2 acquisition plus final confirmations |
+| `stage_2_entrance_m1` | 0.02 | M1 threshold for Stage 2 entry and M2 observation eligibility |
+| `stage_1_max_acquisitions` | 15 | Stage 1 acquisition budget, including baseline; positive integer leaving at least one Stage 2 acquisition plus final confirmations |
 | `max_acquisitions` | 40 | Total budget including baseline and final confirmation images; transit moves take no images |
 | `confirmations` | 2 | Number of final reimages; at least two |
 | `readback_tolerance` | 0.001 | Maximum Euclidean readback discrepancy and per-axis allowance outside global bounds, in motor units; commanded targets remain within exact bounds |
-| `bo_halfwidth` | [5, 5] | Half-widths of a symmetric motor search box centered on the best eligible observation |
+| `stage_2_bo_halfwidth` | [5, 5] | Half-widths of a symmetric motor search box centered on the best eligible observation |
 | `bo_initial_samples` | 5 | Stage 1 initial measurements including baseline, and Stage 2 eligible random measurements before EI; 0 starts EI when a training observation exists |
 | `gp_length_scale` | [2.5, 2.5] | Initial Matérn-5/2 length scales and fallback before three distinct eligible locations, in motor units |
 | `gp_length_scale_bounds` | [0.5, 10] | Positive finite lower/upper bounds shared by both fitted spatial scales, in motor units |
 | `gp_noise` | 0.05 | Observation standard deviation in standardized GP target units; squared for GP alpha |
-| `gp_stage1_noise_multiplier` | 3 | Multiplier on M2 GP noise for baseline and Stage 1 observations; finite and at least 1; default gives nine times the variance |
+| `stage_2_gp_stage_1_noise_multiplier` | 3 | Multiplier on M2 GP noise for baseline and Stage 1 observations; finite and at least 1; default gives nine times the variance |
 | `bo_candidates` | 256 | Random candidate count per continuous BO iteration |
 | `ei_xi` | 0 | EI improvement margin in the current objective's units (M1 or M2) |
-| `min_ei` | 0 | Stop if maximum EI is at most this value, in M2 units |
-| `target_m2` | null | Optional absolute M2 target under consistent acquisition conditions |
+| `stage_2_min_ei` | 0 | Stop if maximum EI is at most this value, in M2 units |
+| `stage_2_target_m2` | null | Optional absolute M2 target under consistent acquisition conditions |
 | `seed` | 0 | Random seed for reproducible candidate generation |
 
 Set bounds and `max_step` for the current instrument. All settings are recorded at
@@ -118,7 +118,7 @@ with repeated measurements at the local instrument; they are not universal.
 ### Stage 1: global M1 optimization
 
 Minimize M1 using a Matérn-5/2 Gaussian process and expected improvement over the
-full configured `bounds`. `bo_halfwidth` and Stage 2 M1 neighborhood exclusions
+full configured `bounds`. `stage_2_bo_halfwidth` and Stage 2 M1 neighborhood exclusions
 do not restrict this domain. All finite M1 observations train this GP, including
 failed fits and scores above the entry threshold. Use `gp_noise` to tolerate
 uncertain scores. The first `bo_initial_samples` measurements, counting the
@@ -127,8 +127,8 @@ Random initialization ignores `min_step`/`max_step` and moves directly to each
 sampled target, avoiding duplicate positions and staying within global bounds.
 
 Enter Stage 2 when **either** the lowest observed M1 is at or below
-`bo_stage_entrance_m1` **or** `stage1_max_acquisitions` is exhausted. No consecutive
-entry confirmations are required. Stage 1 does not terminate on `min_ei`; when no
+`stage_2_entrance_m1` **or** `stage_1_max_acquisitions` is exhausted. No consecutive
+entry confirmations are required. Stage 1 does not terminate on `stage_2_min_ei`; when no
 distinct candidate remains it reimages the best M1 until a transition condition
 is met. Its acquisition budget is part of `max_acquisitions`, which also reserves
 `confirmations` final images and at least one Stage 2 acquisition.
@@ -160,7 +160,7 @@ and repeated confirmations. The acquisition function is expected improvement
 `EI(M2)` relative to the lowest eligible observed M2. Targets are standardized,
 and each observation receives a diagonal noise variance in standardized units.
 For `baseline`, `stage1`, and `stage1_init` observations, the M2 GP variance is
-`(gp_noise * gp_stage1_noise_multiplier)**2`; other stages use `gp_noise**2`.
+`(gp_noise * stage_2_gp_stage_1_noise_multiplier)**2`; other stages use `gp_noise**2`.
 The default multiplier of 3 reduces Stage 1 measurements' influence with nine
 times the variance. Set it to 1 for equal observation noise. After three
 distinct eligible locations, fit anisotropic length scales by maximizing marginal
@@ -179,7 +179,7 @@ lists the acquisitions defining exclusions. Nonfinite M2 alone excludes an
 observation from training without creating an M1 neighborhood exclusion.
 
 Initialization and EI sampling both stay within global `bounds`, the local box
-with half-widths `bo_halfwidth`, and the M1 neighborhood exclusions above. Random
+with half-widths `stage_2_bo_halfwidth`, and the M1 neighborhood exclusions above. Random
 initialization ignores `min_step`/`max_step`, moves directly to each sampled
 target, and avoids exact duplicate measurements. Global bounds, readback
 verification, the local box, and M1 exclusions still apply. For subsequent EI sampling, filter displacements from the actual
@@ -382,6 +382,6 @@ final measured position. A motor or acquisition fault gives `blocked` without
 blind recovery. Exhausted search with confirmed feasible geometry gives
 `best_found`. Unconfirmed or infeasible final geometry gives `unconfirmed`.
 `metric_target_reached` requires all final reimages to satisfy both the M1 bound
-and explicit `target_m2`. Omitting the M2 target reports the best result without
+and explicit `stage_2_target_m2`. Omitting the M2 target reports the best result without
 asserting optimality. This numerical result supports the skill's visual criteria;
 a low integrated hole signal alone cannot exclude every localized bright defect.

@@ -26,21 +26,21 @@ class Settings:
     max_step: float
     min_step: float = 0.5
     evaluator: dict = field(default_factory=dict)
-    bo_stage_entrance_m1: float = 0.02
-    stage1_max_acquisitions: int = 15
+    stage_2_entrance_m1: float = 0.02
+    stage_1_max_acquisitions: int = 15
     max_acquisitions: int = 40
     confirmations: int = 2
     readback_tolerance: float = 0.001
-    bo_halfwidth: tuple[float, float] = (5., 5.)
+    stage_2_bo_halfwidth: tuple[float, float] = (5., 5.)
     gp_length_scale: tuple[float, float] = (2.5, 2.5)
     gp_length_scale_bounds: tuple[float, float] = (0.5, 10.)
     bo_initial_samples: int = 5
     gp_noise: float = 0.05
-    gp_stage1_noise_multiplier: float = 3.0
+    stage_2_gp_stage_1_noise_multiplier: float = 3.0
     ei_xi: float = 0.0
-    min_ei: float = 0.0
+    stage_2_min_ei: float = 0.0
     bo_candidates: int = 256
-    target_m2: float | None = None
+    stage_2_target_m2: float | None = None
     seed: int = 0
 
     def validate(self):
@@ -48,31 +48,31 @@ class Settings:
         if (not np.isfinite([self.min_step, self.max_step]).all()
             or self.max_step <= 0 or not 0 <= self.min_step <= self.max_step):
             raise ValueError("Require max_step > 0 and 0 <= min_step <= max_step")
-        numbers = [self.max_step, self.min_step, self.bo_stage_entrance_m1,
+        numbers = [self.max_step, self.min_step, self.stage_2_entrance_m1,
                    self.readback_tolerance,
-                   *self.bo_halfwidth, *self.gp_length_scale, *self.gp_length_scale_bounds, self.gp_noise, self.ei_xi, self.min_ei,
-                   self.gp_stage1_noise_multiplier]
+                   *self.stage_2_bo_halfwidth, *self.gp_length_scale, *self.gp_length_scale_bounds, self.gp_noise, self.ei_xi, self.stage_2_min_ei,
+                   self.stage_2_gp_stage_1_noise_multiplier]
         if (bounds.shape != (2, 2) or not np.isfinite(bounds).all()
             or np.any(bounds[:, 0] >= bounds[:, 1]) or not np.isfinite(numbers).all()
-            or not 0 < self.bo_stage_entrance_m1
-            or min(self.bo_halfwidth) <= 0 or len(self.bo_halfwidth) != 2
+            or not 0 < self.stage_2_entrance_m1
+            or min(self.stage_2_bo_halfwidth) <= 0 or len(self.stage_2_bo_halfwidth) != 2
             or min(self.gp_length_scale) <= 0 or len(self.gp_length_scale) != 2
             or len(self.gp_length_scale_bounds) != 2
             or not 0 < self.gp_length_scale_bounds[0] < self.gp_length_scale_bounds[1]
             or any(not self.gp_length_scale_bounds[0] <= v <= self.gp_length_scale_bounds[1]
                    for v in self.gp_length_scale)
             or self.gp_noise <= 0 or self.readback_tolerance <= 0
-            or self.gp_stage1_noise_multiplier < 1
-            or min(self.ei_xi, self.min_ei) < 0):
+            or self.stage_2_gp_stage_1_noise_multiplier < 1
+            or min(self.ei_xi, self.stage_2_min_ei) < 0):
             raise ValueError("Invalid bounds, thresholds, step sizes, or GP settings")
         if (not all(isinstance(x, int) for x in [self.max_acquisitions, self.confirmations,
-                                               self.bo_candidates, self.bo_initial_samples, self.stage1_max_acquisitions, self.seed])
+                                               self.bo_candidates, self.bo_initial_samples, self.stage_1_max_acquisitions, self.seed])
             or self.confirmations < 2 or self.max_acquisitions < self.confirmations + 3
-            or not 1 <= self.stage1_max_acquisitions < self.max_acquisitions - self.confirmations
+            or not 1 <= self.stage_1_max_acquisitions < self.max_acquisitions - self.confirmations
             or self.bo_initial_samples < 0 or self.bo_candidates < 4 or self.seed < 0):
             raise ValueError("Require >=2 confirmations, sufficient acquisition budget, and >=4 candidates")
-        if self.target_m2 is not None and not np.isfinite(self.target_m2):
-            raise ValueError("target_m2 must be finite")
+        if self.stage_2_target_m2 is not None and not np.isfinite(self.stage_2_target_m2):
+            raise ValueError("stage_2_target_m2 must be finite")
         Config(**self.evaluator).validate()
 
 
@@ -106,7 +106,7 @@ class Replay:
 def eligible_geometry(observation, settings):
     m = observation["metrics"]
     m1 = float(m["primary_metric"])
-    return bool(m["valid"] and np.isfinite(m1) and m1 <= settings.bo_stage_entrance_m1)
+    return bool(m["valid"] and np.isfinite(m1) and m1 <= settings.stage_2_entrance_m1)
 
 
 def feasible(observation, settings):
@@ -128,7 +128,7 @@ def fit_objective(observations, settings, metric="secondary_metric"):
     x = np.array([o["position"] for o in eligible])
     y = np.array([float(o["metrics"][metric]) for o in eligible])
     noise = np.array([settings.gp_noise * (
-        settings.gp_stage1_noise_multiplier
+        settings.stage_2_gp_stage_1_noise_multiplier
         if metric == "secondary_metric" and o.get("stage") in {"baseline", "stage1", "stage1_init"}
         else 1.) for o in eligible])
     # Repeated confirmations alone cannot identify spatial length scales.
@@ -249,7 +249,7 @@ class Controller:
         eligible = feasible(obs, self.s)
         if not m["valid"]:
             rejection = "invalid fit"
-        elif not np.isfinite(float(m["primary_metric"])) or float(m["primary_metric"]) > self.s.bo_stage_entrance_m1:
+        elif not np.isfinite(float(m["primary_metric"])) or float(m["primary_metric"]) > self.s.stage_2_entrance_m1:
             rejection = "M1 exceeds BO threshold or is nonfinite"
         elif not np.isfinite(float(m["secondary_metric"])):
             rejection = "nonfinite M2"
@@ -273,15 +273,15 @@ class Controller:
         if hasattr(self.backend, "candidate_positions"):
             pool = np.asarray(self.backend.candidate_positions, float)
         else:
-            lo = np.maximum(bounds[:, 0], p - self.s.bo_halfwidth)
-            hi = np.minimum(bounds[:, 1], p + self.s.bo_halfwidth)
+            lo = np.maximum(bounds[:, 0], p - self.s.stage_2_bo_halfwidth)
+            hi = np.minimum(bounds[:, 1], p + self.s.stage_2_bo_halfwidth)
             pool = self.rng.uniform(lo, hi, (self.s.bo_candidates, 2))
         allowed = np.all((pool >= bounds[:, 0]) & (pool <= bounds[:, 1]), axis=1)
         if not initial:
             distance = np.linalg.norm(pool - self.position(), axis=1)
             allowed &= ((distance <= self.s.max_step + 1e-9)
                         & (distance >= max(1e-9, self.s.min_step - 1e-9)))
-        allowed &= np.all(np.abs(pool - p) <= np.asarray(self.s.bo_halfwidth) + 1e-9, axis=1)
+        allowed &= np.all(np.abs(pool - p) <= np.asarray(self.s.stage_2_bo_halfwidth) + 1e-9, axis=1)
         pool = pool[allowed]
         if len(pool) and self.history:
             seen = np.array([o["position"] for o in self.history])
@@ -363,8 +363,8 @@ class Controller:
             while self.acquisitions < self.s.max_acquisitions - self.s.confirmations:
                 primary_best = self.best_observed(False)
                 if stage == "stage1":
-                    threshold_met = float(primary_best["metrics"]["primary_metric"]) <= self.s.bo_stage_entrance_m1
-                    budget_met = self.acquisitions >= self.s.stage1_max_acquisitions
+                    threshold_met = float(primary_best["metrics"]["primary_metric"]) <= self.s.stage_2_entrance_m1
+                    budget_met = self.acquisitions >= self.s.stage_1_max_acquisitions
                     if threshold_met or budget_met:
                         stage, bo_started = "bo", True
                         self.record("stage_transition", stage="bo", from_stage="stage1",
@@ -396,8 +396,8 @@ class Controller:
 
                 # Stage 2 can start on budget exhaustion before any eligible M2 exists.
                 incumbent = self.best or primary_best
-                if (self.best is not None and self.s.target_m2 is not None
-                    and float(self.best["metrics"]["secondary_metric"]) <= self.s.target_m2):
+                if (self.best is not None and self.s.stage_2_target_m2 is not None
+                    and float(self.best["metrics"]["secondary_metric"]) <= self.s.stage_2_target_m2):
                     reason = "requested metric target reached"
                     break
                 gp = None
@@ -425,7 +425,7 @@ class Controller:
                     acquisition_stage = "bo_init"
                 else:
                     scores = expected_improvement(gp, pool, float(incumbent["metrics"]["secondary_metric"]), self.s)
-                    if scores.max() <= self.s.min_ei:
+                    if scores.max() <= self.s.stage_2_min_ei:
                         reason = "expected improvement below threshold"
                         break
                     trial = pool[np.argmax(scores)]
@@ -446,8 +446,8 @@ class Controller:
                 obs = self.acquire(incumbent["target"], "Reimage final position to check metric stability.", "final")
                 confirmations.append(obs)
             stable = len(confirmations) == self.s.confirmations and all(feasible(o, self.s) for o in confirmations)
-            if stable and self.s.target_m2 is not None and all(
-                float(o["metrics"]["secondary_metric"]) <= self.s.target_m2 for o in confirmations):
+            if stable and self.s.stage_2_target_m2 is not None and all(
+                float(o["metrics"]["secondary_metric"]) <= self.s.stage_2_target_m2 for o in confirmations):
                 status = "metric_target_reached"
             elif not stable:
                 status = "unconfirmed"

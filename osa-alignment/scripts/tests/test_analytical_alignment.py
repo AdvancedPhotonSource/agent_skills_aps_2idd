@@ -46,9 +46,9 @@ class SyntheticBackend:
 
 
 def settings(**options):
-    options.setdefault("stage1_max_acquisitions", min(3, options.get("max_acquisitions", 40) - 3))
+    options.setdefault("stage_1_max_acquisitions", min(3, options.get("max_acquisitions", 40) - 3))
     return Settings(**dict(dict(units="um", bounds=[[-15, 15], [-15, 15]], max_step=5.,
-                                min_step=1., target_m2=10., max_acquisitions=40), **options))
+                                min_step=1., stage_2_target_m2=10., max_acquisitions=40), **options))
 
 
 def test_gp_uses_only_eligible_objectives():
@@ -82,7 +82,7 @@ def test_stage1_noise_reduces_influence_on_gp_prediction():
     fine = observation([0, 0])
     fine.update(stage='bo')
     fine['metrics']['secondary_metric'] = 0.
-    equal, _ = fit_objective([stage1, fine], settings(gp_stage1_noise_multiplier=1.))
+    equal, _ = fit_objective([stage1, fine], settings(stage_2_gp_stage_1_noise_multiplier=1.))
     weighted, _ = fit_objective([stage1, fine], settings())
     np.testing.assert_allclose(equal.alpha, [.0025, .0025])
     np.testing.assert_allclose(equal.predict([[0, 0]]), [1.])
@@ -110,8 +110,8 @@ def test_replay_is_exact_discrete_and_cycles_repeats():
         backend.move_absolute([.1, 0])
 
 
-@pytest.mark.parametrize("options", [dict(max_step=0), dict(bo_stage_entrance_m1=0),
-                                   dict(bounds=[[15, -15], [-15, 15]]), dict(stage1_max_acquisitions=0),
+@pytest.mark.parametrize("options", [dict(max_step=0), dict(stage_2_entrance_m1=0),
+                                   dict(bounds=[[15, -15], [-15, 15]]), dict(stage_1_max_acquisitions=0),
                                    dict(max_acquisitions=3)])
 def test_unsafe_settings_rejected(options):
     with pytest.raises(ValueError):
@@ -164,7 +164,7 @@ def test_missing_boundaries_do_not_train_objective_gp():
 def test_continuous_candidates_respect_symmetric_box_and_step_limit(tmp_path):
     backend = SyntheticBackend([5, 5])
     del backend.candidate_positions
-    c = Controller(settings(bo_halfwidth=[2, 3]), backend, tmp_path / "log",
+    c = Controller(settings(stage_2_bo_halfwidth=[2, 3]), backend, tmp_path / "log",
                    lambda p: observation(p))
     incumbent = observation([5, 5])
     c.history.append(incumbent)
@@ -197,8 +197,8 @@ def test_measurement_and_controller_accept_translated_resized_images(tmp_path, f
             return paths[(self.acquisitions - 1) % 2]
 
     backend = Images([0, 0])
-    c = Controller(settings(evaluator=evaluator, bo_stage_entrance_m1=.05,
-                                target_m2=1e9), backend, tmp_path / 'trajectory')
+    c = Controller(settings(evaluator=evaluator, stage_2_entrance_m1=.05,
+                                stage_2_target_m2=1e9), backend, tmp_path / 'trajectory')
     result = c.run()
     assert result['status'] == 'metric_target_reached'
     assert len({tuple(o['metrics']['image_shape']) for o in c.history}) == 2
@@ -229,7 +229,7 @@ def test_initialization_counts_eligible_random_measurements_and_reuses_stage1(tm
         if obs['metrics']['valid']:
             obs['metrics']['primary_metric'] = .01
         return obs
-    c = Controller(settings(target_m2=None, max_acquisitions=11),
+    c = Controller(settings(stage_2_target_m2=None, max_acquisitions=11),
                    backend, tmp_path / 'log', measured)
     points = iter([[1, 0], [-1, 0], [-2, 0], [-2, 1], [-1, 1], [0, 1], [0, 2], [1, 2]])
     monkeypatch.setattr(c, 'candidates', lambda incumbent, **kwargs: np.array([next(points)], float))
@@ -255,7 +255,7 @@ def test_initialization_budget_exhaustion_reserves_final_confirmations(tmp_path,
         if obs['metrics']['valid']:
             obs['metrics']['primary_metric'] = .01
         return obs
-    c = Controller(settings(target_m2=None, bo_initial_samples=20, max_acquisitions=8),
+    c = Controller(settings(stage_2_target_m2=None, bo_initial_samples=20, max_acquisitions=8),
                    backend, tmp_path / 'log', measured)
     result = c.run()
     assert result['reason'] == 'random initialization budget exhausted'
@@ -267,7 +267,7 @@ def test_initialization_budget_exhaustion_reserves_final_confirmations(tmp_path,
 
 def test_exclusions_use_current_anisotropic_scales_and_actual_readback(tmp_path):
     backend = SyntheticBackend([4, 0])
-    c = Controller(settings(target_m2=None, max_step=3, bo_halfwidth=[4, 3]),
+    c = Controller(settings(stage_2_target_m2=None, max_step=3, stage_2_bo_halfwidth=[4, 3]),
                    backend, tmp_path / 'log')
     best = observation([0, 0])
     high = observation([2, 0])
@@ -296,7 +296,7 @@ def test_exhausted_exclusions_stop_initialization_and_confirm_best(tmp_path):
         if np.any(p):
             obs['metrics']['primary_metric'] = .03
         return obs
-    c = Controller(settings(target_m2=None), backend, tmp_path / 'log', measured)
+    c = Controller(settings(stage_2_target_m2=None), backend, tmp_path / 'log', measured)
     result = c.run()
     assert 'no sampleable candidates' in result['reason']
     assert 'random initialization incomplete' in result['reason']
@@ -317,7 +317,7 @@ def test_final_return_uses_bounded_transits_without_extra_images(tmp_path, repla
         obs = observation(p)
         obs['metrics']['primary_metric'] = .01
         return obs
-    c = Controller(settings(target_m2=None, max_step=3, bo_halfwidth=[8, 8],
+    c = Controller(settings(stage_2_target_m2=None, max_step=3, stage_2_bo_halfwidth=[8, 8],
                    bo_initial_samples=2, max_acquisitions=6, seed=1), backend, tmp_path / 'log', measured)
     result = c.run()
     assert result['status'] == 'best_found'
@@ -342,7 +342,7 @@ def test_final_return_uses_lowest_m2_after_bo_started(tmp_path, replay):
         obs['metrics']['primary_metric'] = {0: .01, 3: .015, 6: .005}[p[0]]
         obs['metrics']['secondary_metric'] = {0: 10., 3: 5., 6: 20.}[p[0]]
         return obs
-    c = Controller(settings(target_m2=None, max_step=3, bo_halfwidth=[8, 8],
+    c = Controller(settings(stage_2_target_m2=None, max_step=3, stage_2_bo_halfwidth=[8, 8],
                    bo_initial_samples=2, max_acquisitions=6), backend, tmp_path / 'log', measured)
     result = c.run()
     assert result['status'] == 'best_found'
@@ -355,15 +355,15 @@ def test_final_return_uses_lowest_m2_after_bo_started(tmp_path, replay):
 @pytest.mark.parametrize('options', [dict(bo_initial_samples=-1), dict(bo_initial_samples=1.5),
     dict(gp_length_scale_bounds=[0, 10]), dict(gp_length_scale_bounds=[3, 2]),
     dict(gp_length_scale_bounds=[.1, float('inf')]), dict(gp_length_scale=[.1, 2]),
-    dict(gp_stage1_noise_multiplier=.5), dict(gp_stage1_noise_multiplier=float('inf')),
-    dict(gp_stage1_noise_multiplier=float('nan'))])
+    dict(stage_2_gp_stage_1_noise_multiplier=.5), dict(stage_2_gp_stage_1_noise_multiplier=float('inf')),
+    dict(stage_2_gp_stage_1_noise_multiplier=float('nan'))])
 def test_bo_settings_validation(options):
     with pytest.raises(ValueError):
         settings(**options).validate()
 
 
 def test_zero_random_samples_enters_ei_directly(tmp_path):
-    c = Controller(settings(target_m2=None, bo_initial_samples=0, max_acquisitions=6),
+    c = Controller(settings(stage_2_target_m2=None, bo_initial_samples=0, max_acquisitions=6),
                    SyntheticBackend([0, 0]), tmp_path / 'log', lambda p: observation(p))
     c.run()
     assert c.history[1]['stage'] == 'bo'
@@ -390,7 +390,7 @@ def test_final_transit_readback_fault_stops_without_confirmation(tmp_path):
         obs = observation(p)
         obs['metrics']['primary_metric'] = .01
         return obs
-    c = Controller(settings(target_m2=None, max_step=3, bo_halfwidth=[8, 8],
+    c = Controller(settings(stage_2_target_m2=None, max_step=3, stage_2_bo_halfwidth=[8, 8],
                    bo_initial_samples=2, max_acquisitions=6), backend, tmp_path / 'log', measured)
     result = c.run()
     assert result['status'] == 'blocked'
@@ -417,7 +417,7 @@ def test_m1_gp_uses_failed_fits_and_high_scores():
 @pytest.mark.parametrize('invalid', [False, True])
 def test_m1_threshold_enters_stage2_without_entry_confirmations(tmp_path, invalid):
     backend = SyntheticBackend([0, 0])
-    c = Controller(settings(target_m2=None), backend, tmp_path / 'log',
+    c = Controller(settings(stage_2_target_m2=None), backend, tmp_path / 'log',
                    lambda p: observation(p, invalid=invalid))
     c.run()
     transitions = [e for e in events(c) if e['event'] == 'stage_transition']
@@ -436,8 +436,8 @@ def test_stage1_budget_enters_stage2_without_eligible_m2(tmp_path, monkeypatch):
         obs['metrics']['primary_metric'] = .1 if backend.acquisitions <= 2 else .01
         return obs
 
-    c = Controller(settings(stage1_max_acquisitions=2, max_acquisitions=8,
-                            bo_initial_samples=0, target_m2=None),
+    c = Controller(settings(stage_1_max_acquisitions=2, max_acquisitions=8,
+                            bo_initial_samples=0, stage_2_target_m2=None),
                    backend, tmp_path / 'log', measured)
     monkeypatch.setattr(c, 'stage1_candidates', lambda **kwargs: np.array([[10., 0.]]))
     pools = iter([np.array([[5., 0.]]), np.empty((0, 2))])
@@ -461,7 +461,7 @@ def test_stage1_candidates_cover_full_bounds_without_m1_exclusions(tmp_path, con
     backend = SyntheticBackend([0, 0])
     if continuous:
         del backend.candidate_positions
-    c = Controller(settings(bo_halfwidth=[1, 1], max_step=2), backend, tmp_path / 'log')
+    c = Controller(settings(stage_2_bo_halfwidth=[1, 1], max_step=2), backend, tmp_path / 'log')
     c.history = [observation([0, 0], invalid=True), observation([10, 10], invalid=True)]
     pool = c.stage1_candidates()
     assert len(pool)
@@ -480,8 +480,8 @@ def test_stage1_global_search_optimizes_m1_and_uses_bounded_transits(tmp_path, r
                if replay else SyntheticBackend([12, 0]))
     if not replay:
         backend.candidate_positions = np.array(points)
-    c = Controller(settings(max_step=3, stage1_max_acquisitions=10, max_acquisitions=16,
-                            bo_initial_samples=2, bo_stage_entrance_m1=.011, target_m2=10),
+    c = Controller(settings(max_step=3, stage_1_max_acquisitions=10, max_acquisitions=16,
+                            bo_initial_samples=2, stage_2_entrance_m1=.011, stage_2_target_m2=10),
                    backend, tmp_path / 'log', observation)
     result = c.run()
     assert result['status'] == 'metric_target_reached'
@@ -504,7 +504,7 @@ def test_budget_entry_with_no_eligible_m2_returns_lowest_m1(tmp_path, monkeypatc
         obs['metrics']['primary_metric'] = .05 if p[0] else .1
         return obs
 
-    c = Controller(settings(stage1_max_acquisitions=2, max_acquisitions=6, target_m2=None),
+    c = Controller(settings(stage_1_max_acquisitions=2, max_acquisitions=6, stage_2_target_m2=None),
                    backend, tmp_path / 'log', measured)
     monkeypatch.setattr(c, 'stage1_candidates', lambda **kwargs: np.array([[10., 0.]]))
     monkeypatch.setattr(c, 'candidates', lambda incumbent, **kwargs: np.empty((0, 2)))
@@ -524,7 +524,7 @@ def test_depleted_stage1_domain_uses_budget_then_transitions(tmp_path):
         obs['metrics']['primary_metric'] = .1
         return obs
 
-    c = Controller(settings(stage1_max_acquisitions=3, max_acquisitions=7), backend, tmp_path / 'log', measured)
+    c = Controller(settings(stage_1_max_acquisitions=3, max_acquisitions=7), backend, tmp_path / 'log', measured)
     result = c.run()
     assert result['status'] == 'unconfirmed'
     transition = next(e for e in events(c) if e['event'] == 'stage_transition')
@@ -536,7 +536,7 @@ def test_depleted_stage1_domain_uses_budget_then_transitions(tmp_path):
 @pytest.mark.parametrize('value', [0, -1, 1.5, 6, float('inf')])
 def test_stage1_budget_validation_preserves_stage2_and_confirmations(value):
     with pytest.raises(ValueError):
-        settings(max_acquisitions=8, stage1_max_acquisitions=value).validate()
+        settings(max_acquisitions=8, stage_1_max_acquisitions=value).validate()
 
 
 def test_bundled_config_needs_no_calibration():
@@ -641,7 +641,7 @@ def test_smallest_supported_image_still_has_finite_m1(fixed):
 def test_random_initialization_ignores_step_filters_but_keeps_search_domain(tmp_path, stage):
     backend = SyntheticBackend([0, 0])
     backend.candidate_positions = np.array([[0, 0], [.1, 0], [.4, 0], [12, 0], [14, 0], [16, 0]])
-    c = Controller(settings(min_step=1, max_step=2, bo_halfwidth=[12, 12]),
+    c = Controller(settings(min_step=1, max_step=2, stage_2_bo_halfwidth=[12, 12]),
                    backend, tmp_path / 'log')
     baseline = observation([0, 0])
     c.history = [baseline]
@@ -667,9 +667,9 @@ def test_random_acquisitions_move_directly_to_near_and_far_targets(tmp_path, sta
         obs['metrics']['primary_metric'] = .1 if stage == 1 else .01
         return obs
 
-    c = Controller(settings(min_step=1, max_step=2, bo_halfwidth=[15, 15],
+    c = Controller(settings(min_step=1, max_step=2, stage_2_bo_halfwidth=[15, 15],
                             bo_initial_samples=3 if stage == 1 else 2,
-                            stage1_max_acquisitions=3, max_acquisitions=7, target_m2=None),
+                            stage_1_max_acquisitions=3, max_acquisitions=7, stage_2_target_m2=None),
                    backend, tmp_path / 'log', measured)
     result = c.run()
     assert result['status'] == ('unconfirmed' if stage == 1 else 'best_found')
@@ -689,7 +689,7 @@ def test_random_acquisitions_move_directly_to_near_and_far_targets(tmp_path, sta
 def test_stage2_random_replay_allows_direct_moves_to_distant_recorded_locations(tmp_path):
     backend = Replay(dict(units='um', samples=[dict(position=[x, 0], image=[x, 0])
                                                for x in [0, .25, 3, 6, 12]]), [0, 0])
-    c = Controller(settings(max_step=3, bo_halfwidth=[15, 15]), backend, tmp_path / 'log')
+    c = Controller(settings(max_step=3, stage_2_bo_halfwidth=[15, 15]), backend, tmp_path / 'log')
     baseline = observation([0, 0])
     c.history = [baseline]
     pool = c.candidates(baseline, initial=True)
@@ -766,8 +766,8 @@ def test_tolerated_boundary_readbacks_survive_baseline_reimages_and_final_return
         obs['metrics']['primary_metric'] = .01 if eligible else .1
         return obs
 
-    c = Controller(settings(stage1_max_acquisitions=3, bo_initial_samples=0,
-                            max_acquisitions=7, target_m2=1000 if eligible else None),
+    c = Controller(settings(stage_1_max_acquisitions=3, bo_initial_samples=0,
+                            max_acquisitions=7, stage_2_target_m2=1000 if eligible else None),
                    backend, tmp_path / 'log', measured)
     result = c.run()
     assert result['status'] == ('metric_target_reached' if eligible else 'unconfirmed')
@@ -794,7 +794,7 @@ def test_invalid_step_settings_explain_the_requirement(options):
 def test_zero_min_step_allows_close_samples_but_excludes_measured_positions(tmp_path, stage, initial):
     backend = SyntheticBackend([0, 0])
     backend.candidate_positions = np.array([[0, 0], [.00001, 0], [1, 0], [10, 0]])
-    c = Controller(settings(min_step=0, max_step=5, bo_halfwidth=[15, 15]),
+    c = Controller(settings(min_step=0, max_step=5, stage_2_bo_halfwidth=[15, 15]),
                    backend, tmp_path / 'log')
     baseline = observation([0, 0])
     c.history = [baseline, observation([1, 0])]

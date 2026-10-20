@@ -13,10 +13,10 @@
   "max_step": 30,
   "min_step": 0,
   "max_acquisitions": 60,
-  "bo_stage_entrance_m1": 0.12,
+  "stage_2_entrance_m1": 0.12,
   "readback_tolerance": 10,
-  "stage1_max_acquisitions": 30,
-  "bo_halfwidth": [5, 5],
+  "stage_1_max_acquisitions": 30,
+  "stage_2_bo_halfwidth": [5, 5],
   "bo_initial_samples": 10,
   "gp_noise": 0.02
 }
