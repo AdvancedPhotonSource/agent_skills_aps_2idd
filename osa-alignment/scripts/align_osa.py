@@ -74,6 +74,8 @@ class Settings:
             raise ValueError("Require >=2 confirmations, sufficient acquisition budget, and >=4 candidates")
         if self.stage_2_target_m2 is not None and not np.isfinite(self.stage_2_target_m2):
             raise ValueError("stage_2_target_m2 must be finite")
+        if self.bo_initial_samples > self.stage_1_max_acquisitions:
+            raise ValueError("stage_1_max_acquisitions must accommodate bo_initial_samples")
         Config(**self.evaluator).validate()
 
 
@@ -295,13 +297,14 @@ class Controller:
             pool = pool[np.all(np.sum(offsets ** 2, axis=2) > 1., axis=1)]
         return pool
 
-    def posterior_mean_center(self, gp, center):
-        """Numerically minimize posterior mean within the current unexcluded box."""
-        center = np.asarray(center, float)
+    def posterior_mean_center(self, gp, center=None):
+        """Minimize M1 globally, or M2 within the current unexcluded box."""
+        global_search = center is None
         bounds = np.asarray(self.s.bounds)
-        lo = np.maximum(bounds[:, 0], center - self.s.stage_2_bo_halfwidth)
-        hi = np.minimum(bounds[:, 1], center + self.s.stage_2_bo_halfwidth)
-        rejected = np.array([o['position'] for o in self.history
+        center = np.clip(self.position(), bounds[:, 0], bounds[:, 1]) if global_search else np.asarray(center, float)
+        lo = bounds[:, 0] if global_search else np.maximum(bounds[:, 0], center - self.s.stage_2_bo_halfwidth)
+        hi = bounds[:, 1] if global_search else np.minimum(bounds[:, 1], center + self.s.stage_2_bo_halfwidth)
+        rejected = np.array([] if global_search else [o['position'] for o in self.history
                              if not eligible_geometry(o, self.s)]).reshape(-1, 2)
 
         def clearance(points):
@@ -311,6 +314,13 @@ class Controller:
         def allowed(points):
             return (np.all((points >= lo) & (points <= hi), axis=1)
                     & np.all(clearance(points) >= -1e-8, axis=1))
+
+        if global_search and hasattr(self.backend, 'candidate_positions'):
+            # Recorded/discrete domains must be minimized at available positions.
+            pool = np.asarray(self.backend.candidate_positions, float)
+            pool = pool[allowed(pool)]
+            pool = pool[np.argsort(np.linalg.norm(pool - center, axis=1), kind='stable')]
+            return pool[np.argmin(gp.predict(pool))].copy()
 
         grid = np.stack(np.meshgrid(*[np.linspace(a, b, 17) for a, b in zip(lo, hi)]), axis=-1).reshape(-1, 2)
         measured = np.array([o['position'] for o in self.history]).reshape(-1, 2)
@@ -408,21 +418,37 @@ class Controller:
             while self.acquisitions < self.s.max_acquisitions - self.s.confirmations:
                 primary_best = self.best_observed(False)
                 if stage == "stage1":
-                    threshold_met = float(primary_best["metrics"]["primary_metric"]) <= self.s.stage_2_entrance_m1
-                    budget_met = self.acquisitions >= self.s.stage_1_max_acquisitions
-                    if threshold_met or budget_met:
-                        stage, bo_started = "stage_2", True
-                        stage2_center = np.array((self.best or primary_best)['position'], float)
-                        self.record("stage_transition", stage="stage_2", from_stage="stage1",
-                                    reason="M1 threshold reached" if threshold_met else "stage 1 budget exhausted",
-                                    stage1_acquisitions=self.acquisitions)
-                if stage == "stage1":
                     gp, fitted = fit_objective(self.history, self.s, "primary_metric")
                     self.record("bo_model", stage=stage, objective="primary_metric",
                                 length_scales=np.asarray(gp.kernel_.length_scale).tolist(),
                                 length_scales_fitted=fitted, training_count=len(gp.X_train_),
-                                training_acquisitions=[o["acquisition"] for o in self.history],
+                                training_acquisitions=[o["acquisition"] for o in
+                                    objective_observations(self.history, self.s, "primary_metric")],
                                 exclusion_acquisitions=[])
+                    if self.acquisitions >= self.s.bo_initial_samples:
+                        stage2_center = self.posterior_mean_center(gp)
+                        predicted_m1 = float(gp.predict(stage2_center[None, :])[0])
+                        threshold_met = predicted_m1 <= self.s.stage_2_entrance_m1
+                        budget_met = self.acquisitions >= self.s.stage_1_max_acquisitions
+                        self.record("stage_2_entry_check", position=stage2_center.tolist(),
+                                    posterior_mean_m1=predicted_m1, threshold_met=threshold_met,
+                                    stage1_acquisitions=self.acquisitions)
+                        if threshold_met or budget_met:
+                            stage, bo_started = "stage_2", True
+                            self.record("stage_transition", stage=stage, from_stage="stage1",
+                                        reason="M1 posterior mean threshold reached" if threshold_met else "stage 1 budget exhausted",
+                                        stage1_acquisitions=self.acquisitions,
+                                        position=stage2_center.tolist(), posterior_mean_m1=predicted_m1)
+                            self.record("search_box", stage=stage, center=stage2_center.tolist(),
+                                        centering="initialization_anchor")
+                            acquisition_stage = "stage_2_init" if self.s.bo_initial_samples else "stage_2"
+                            if acquisition_stage == "stage_2":
+                                self.travel_to(stage2_center)
+                            obs = self.acquire(stage2_center, "Measure Stage 2 entry at the M1 posterior mean minimum.",
+                                               acquisition_stage)
+                            if acquisition_stage == "stage_2_init" and feasible(obs, self.s):
+                                initial_samples += 1
+                            continue
                     pool = self.stage1_candidates(initial=self.acquisitions < self.s.bo_initial_samples)
                     if not len(pool):
                         # A discrete or very small domain can be fully sampled before the budget.

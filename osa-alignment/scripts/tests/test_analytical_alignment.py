@@ -47,6 +47,7 @@ class SyntheticBackend:
 
 def settings(**options):
     options.setdefault("stage_1_max_acquisitions", min(3, options.get("max_acquisitions", 40) - 3))
+    options.setdefault("bo_initial_samples", min(5, options["stage_1_max_acquisitions"]))
     return Settings(**dict(dict(units="um", bounds=[[-15, 15], [-15, 15]], max_step=5.,
                                 min_step=1., stage_2_target_m2=10., max_acquisitions=40), **options))
 
@@ -225,51 +226,60 @@ def test_worse_eligible_m2_changes_gp_but_rejected_metrics_do_not():
 def test_initialization_counts_eligible_random_measurements_and_reuses_stage1(tmp_path, monkeypatch):
     backend = SyntheticBackend([0, 0])
     def measured(p):
-        obs = observation(p, invalid=backend.acquisitions == 2)
+        obs = observation(p, invalid=backend.acquisitions == 5)
         if obs['metrics']['valid']:
             obs['metrics']['primary_metric'] = .01
         return obs
-    c = Controller(settings(stage_2_target_m2=None, max_acquisitions=11),
+    c = Controller(settings(stage_2_target_m2=None, bo_initial_samples=3, max_acquisitions=11),
                    backend, tmp_path / 'log', measured)
-    points = iter([[1, 0], [-1, 0], [-2, 0], [-2, 1], [-1, 1], [0, 1], [0, 2], [1, 2]])
+    stage1 = iter([[10, 0], [12, 0]])
+    monkeypatch.setattr(c, 'stage1_candidates', lambda **kwargs: np.array([next(stage1)], float))
+    center = c.posterior_mean_center
+    monkeypatch.setattr(c, 'posterior_mean_center', lambda gp, box=None:
+                        np.array([0., 0.]) if box is None else center(gp, box))
+    points = iter([[1, 0], [-1, 0], [-2, 0], [-2, 1], [-1, 1]])
     monkeypatch.setattr(c, 'candidates', lambda incumbent, **kwargs: np.array([next(points)], float))
     result = c.run()
     initial = [o for o in c.history if o['stage'] == 'stage_2_init']
-    assert len(initial) == 6
-    assert sum(o['bo_eligible'] for o in initial) == 5
-    assert len({tuple(o['position']) for o in initial}) == 6
-    assert initial[0]['bo_rejection_reason'] == 'invalid fit'
-    assert [o['stage'] for o in c.history] == ['baseline'] + ['stage_2_init'] * 6 + ['stage_2'] * 2 + ['final'] * 2
+    assert len(initial) == 4
+    assert sum(o['bo_eligible'] for o in initial) == 3
+    assert len({tuple(o['position']) for o in initial}) == 4
+    assert initial[1]['bo_rejection_reason'] == 'invalid fit'
+    assert [o['stage'] for o in c.history] == (['baseline'] + ['stage1_init'] * 2
+        + ['stage_2_init'] * 4 + ['stage_2'] * 2 + ['final'] * 2)
     assert result['final_readback'] == [0, 0]
-    models = [e for e in map(json.loads, (tmp_path / 'log').read_text().splitlines()) if e['event'] == 'bo_model']
-    assert all(e['stage'] == 'stage_2' for e in models)
-    assert models[-1]['training_acquisitions'] == [1, 3, 4, 5, 6, 7, 8]
-    assert models[-1]['exclusion_acquisitions'] == [2]
+    models = [e for e in events(c) if e['event'] == 'bo_model' and e['stage'] == 'stage_2']
+    assert models[-1]['training_acquisitions'] == [1, 2, 3, 4, 6, 7, 8]
+    assert models[-1]['exclusion_acquisitions'] == [5]
     assert result['acquisitions'] == 11
 
 
 @pytest.mark.parametrize('eligible_entry', [True, False])
 def test_stage2_box_stays_at_entry_until_eligible_initialization_finishes(tmp_path, monkeypatch, eligible_entry):
     backend = SyntheticBackend([0, 0])
-    targets = [[4, 4], [-4, -4], [5, 5], [8, 8], [12, 12]]
+    random_targets = [[4, 4], [-4, -4], [5, 5]] + ([] if eligible_entry else [[3, 4]])
+    targets = random_targets + [[8, 8], [12, 12]]
     backend.candidate_positions = np.array([[0, 0], *targets], float)
 
     def measured(p):
-        invalid = backend.acquisitions == 3 or (backend.acquisitions == 1 and not eligible_entry)
+        invalid = backend.acquisitions == 6 or (backend.acquisitions == 4 and not eligible_entry)
         obs = observation(p, invalid=invalid)
         obs['metrics']['primary_metric'] = .2 if invalid else .01
         if not invalid:
             obs['metrics']['secondary_metric'] = 100. - backend.acquisitions
         return obs
 
-    c = Controller(settings(stage_1_max_acquisitions=1, bo_initial_samples=2,
-                            stage_2_target_m2=None, max_acquisitions=8, max_step=30),
+    c = Controller(settings(stage_1_max_acquisitions=3, bo_initial_samples=3,
+                            stage_2_target_m2=None, max_acquisitions=11 if eligible_entry else 12, max_step=30),
                    backend, tmp_path / 'log', measured)
+    stage1 = iter([[-14, 14], [14, -14]])
+    monkeypatch.setattr(c, 'stage1_candidates', lambda **kwargs: np.array([next(stage1)], float))
     candidates = c.candidates
-    centers, initializing = [], []
-    posterior_calls = []
+    centers, initializing, posterior_calls = [], [], []
 
-    def posterior_center(gp, center):
+    def posterior_center(gp, center=None):
+        if center is None:
+            return np.array([0., 0.])
         posterior_calls.append((len(c.history), np.array(center)))
         return np.array([4.5, 4.5] if len(posterior_calls) == 1 else [7.5, 7.5])
 
@@ -284,17 +294,18 @@ def test_stage2_box_stays_at_entry_until_eligible_initialization_finishes(tmp_pa
     monkeypatch.setattr(c, 'candidates', choose)
     monkeypatch.setattr(c, 'posterior_mean_center', posterior_center)
     result = c.run()
+    n = len(random_targets)
     assert result['status'] == 'best_found'
-    assert initializing == [True, True, True, False, False]
-    np.testing.assert_array_equal(centers, [[0, 0], [0, 0], [0, 0], [4.5, 4.5], [7.5, 7.5]])
-    assert [count for count, _ in posterior_calls] == [4, 5]
+    assert initializing == [True] * n + [False, False]
+    np.testing.assert_array_equal(centers, [[0, 0]] * n + [[4.5, 4.5], [7.5, 7.5]])
+    assert [count for count, _ in posterior_calls] == [4+n, 5+n]
     np.testing.assert_array_equal([center for _, center in posterior_calls], [[0, 0], [4.5, 4.5]])
     assert [o['stage'] for o in c.history] == (
-        ['baseline'] + ['stage_2_init'] * 3 + ['stage_2'] * 2 + ['final'] * 2)
-    assert [o['bo_eligible'] for o in c.history[1:4]] == [True, False, True]
+        ['baseline'] + ['stage1_init'] * 2 + ['stage_2_init'] * (n+1) + ['stage_2'] * 2 + ['final'] * 2)
+    assert sum(o['bo_eligible'] for o in c.history if o['stage'] == 'stage_2_init') == 3
     boxes = [e for e in events(c) if e['event'] == 'search_box']
-    np.testing.assert_array_equal([e['center'] for e in boxes], centers)
-    assert [e['centering'] for e in boxes] == ['initialization_anchor'] * 3 + ['posterior_mean'] * 2
+    np.testing.assert_array_equal([e['center'] for e in boxes], [[0, 0], *centers])
+    assert [e['centering'] for e in boxes] == ['initialization_anchor'] * (n+1) + ['posterior_mean'] * 2
     assert result['final_readback'] == [12., 12.]
 
 
@@ -353,7 +364,7 @@ def test_initialization_budget_exhaustion_reserves_final_confirmations(tmp_path,
         if obs['metrics']['valid']:
             obs['metrics']['primary_metric'] = .01
         return obs
-    c = Controller(settings(stage_2_target_m2=None, bo_initial_samples=20, max_acquisitions=8),
+    c = Controller(settings(stage_2_target_m2=None, bo_initial_samples=4, stage_1_max_acquisitions=4, max_acquisitions=8),
                    backend, tmp_path / 'log', measured)
     result = c.run()
     assert result['reason'] == 'random initialization budget exhausted'
@@ -400,7 +411,7 @@ def test_exhausted_exclusions_stop_initialization_and_confirm_best(tmp_path):
     assert 'random initialization incomplete' in result['reason']
     assert result['status'] == 'best_found'
     assert c.history[1]['bo_rejection_reason'].startswith('M1 exceeds')
-    assert result['acquisitions'] == 4
+    assert result['acquisitions'] == 6
     assert result['final_readback'] == [0, 0]
 
 
@@ -419,9 +430,9 @@ def test_final_return_uses_bounded_transits_without_extra_images(tmp_path, repla
                    bo_initial_samples=2, max_acquisitions=6, seed=1), backend, tmp_path / 'log', measured)
     result = c.run()
     assert result['status'] == 'best_found'
-    assert result['acquisitions'] == 5
+    assert result['acquisitions'] == 6
     assert result['final_readback'] == [0, 0]
-    assert [o['position'] for o in c.history] == [[0, 0], [3, 0], [6, 0], [0, 0], [0, 0]]
+    assert [o['position'] for o in c.history] == [[0, 0], [3, 0], [3, 0], [6, 0], [0, 0], [0, 0]]
     events = list(map(json.loads, (tmp_path / 'log').read_text().splitlines()))
     transits = [e for e in events if e['event'] == 'plan' and e['stage'] == 'transit']
     assert len(transits) >= 2
@@ -444,10 +455,10 @@ def test_final_return_uses_lowest_m2_after_bo_started(tmp_path, replay):
                    bo_initial_samples=2, max_acquisitions=6), backend, tmp_path / 'log', measured)
     result = c.run()
     assert result['status'] == 'best_found'
-    assert result['acquisitions'] == 5
+    assert result['acquisitions'] == 6
     assert result['final_readback'] == [3, 0]
     assert result['best_observed']['position'] == [3, 0]
-    assert [o['position'] for o in c.history] == [[0, 0], [6, 0], [3, 0], [3, 0], [3, 0]]
+    assert [o['position'] for o in c.history] == [[0, 0], [6, 0], [6, 0], [3, 0], [3, 0], [3, 0]]
 
 
 @pytest.mark.parametrize('options', [dict(bo_initial_samples=-1), dict(bo_initial_samples=1.5),
@@ -481,7 +492,7 @@ def test_nonfinite_metrics_never_train_gp(metric, value):
 def test_final_transit_readback_fault_stops_without_confirmation(tmp_path):
     class FaultyTransit(SyntheticBackend):
         def move_absolute(self, target):
-            super().move_absolute(np.array(target) + ([1, 0] if self.acquisitions >= 3 else [0, 0]))
+            super().move_absolute(np.array(target) + ([1, 0] if self.acquisitions >= 4 else [0, 0]))
     backend = FaultyTransit([0, 0])
     backend.candidate_positions = np.array([[3, 0], [6, 0]])
     def measured(p):
@@ -493,7 +504,7 @@ def test_final_transit_readback_fault_stops_without_confirmation(tmp_path):
     result = c.run()
     assert result['status'] == 'blocked'
     assert 'readback' in result['reason']
-    assert result['acquisitions'] == backend.acquisitions == 3
+    assert result['acquisitions'] == backend.acquisitions == 4
     assert len(backend.moves) == 3
     assert not any(o['stage'] == 'final' for o in c.history)
 
@@ -521,10 +532,11 @@ def test_m1_threshold_enters_stage2_without_entry_confirmations(tmp_path, invali
     transitions = [e for e in events(c) if e['event'] == 'stage_transition']
     assert len(transitions) == 1
     assert transitions[0]['stage'] == 'stage_2'
-    assert transitions[0]['reason'] == 'M1 threshold reached'
-    assert transitions[0]['stage1_acquisitions'] == 1
-    assert not any(o['stage'] in ('stage1', 'stage1_init', 'confirm') for o in c.history)
-    assert c.history[1]['stage'] == 'stage_2_init'
+    assert transitions[0]['reason'] == 'M1 posterior mean threshold reached'
+    assert transitions[0]['stage1_acquisitions'] == 3
+    assert [o['stage'] for o in c.history[:3]] == ['baseline', 'stage1_init', 'stage1_init']
+    assert c.history[3]['stage'] == 'stage_2_init'
+    np.testing.assert_array_equal(c.history[3]['position'], transitions[0]['position'])
 
 
 def test_stage1_budget_enters_stage2_without_eligible_m2(tmp_path, monkeypatch):
@@ -543,14 +555,13 @@ def test_stage1_budget_enters_stage2_without_eligible_m2(tmp_path, monkeypatch):
     monkeypatch.setattr(c, 'candidates', lambda incumbent, **kwargs: next(pools))
     result = c.run()
     assert result['status'] == 'best_found'
-    assert [o['stage'] for o in c.history] == ['baseline', 'stage1', 'stage_2_init', 'final', 'final']
+    assert [o['stage'] for o in c.history] == ['baseline', 'stage1', 'stage_2', 'stage_2', 'final', 'final']
     transition = next(e for e in events(c) if e['event'] == 'stage_transition')
     assert transition['reason'] == 'stage 1 budget exhausted'
     assert transition['stage1_acquisitions'] == 2
     models = [e for e in events(c) if e['event'] == 'bo_model']
-    assert [e['objective'] for e in models] == ['primary_metric', 'secondary_metric']
-    assert models[0]['training_acquisitions'] == [1]
-    assert models[1]['training_acquisitions'] == [3]
+    assert [e['objective'] for e in models] == ['primary_metric'] * 2 + ['secondary_metric'] * 2
+    assert [e['training_acquisitions'] for e in models] == [[1], [1, 2], [3], [3, 4]]
     assert all(np.linalg.norm(after - before) <= 5 + 1e-9 for before, after in backend.moves)
     assert result['final_readback'] == [5., 0.]
 
@@ -629,7 +640,7 @@ def test_depleted_stage1_domain_uses_budget_then_transitions(tmp_path):
     transition = next(e for e in events(c) if e['event'] == 'stage_transition')
     assert transition['reason'] == 'stage 1 budget exhausted'
     assert transition['stage1_acquisitions'] == 3
-    assert backend.acquisitions == 5
+    assert backend.acquisitions == 6
 
 
 @pytest.mark.parametrize('value', [0, -1, 1.5, 6, float('inf')])
@@ -775,12 +786,14 @@ def test_random_acquisitions_move_directly_to_near_and_far_targets(tmp_path, sta
     initial = [o for o in c.history if o['stage'] == ('stage1_init' if stage == 1 else 'stage_2_init')]
     assert len(initial) == 2
     np.testing.assert_array_equal([o['position'] for o in initial], [[12, 0], [.25, 0]])
-    assert backend.acquisitions == 5
+    assert backend.acquisitions == 6
     np.testing.assert_array_equal([after for _, after in backend.moves[:2]], [[12, 0], [.25, 0]])
     # Only the later return to the final position uses transit moves.
     plans = [e for e in events(c) if e['event'] == 'plan']
-    assert [e['stage'] for e in plans[:3]] == ['baseline'] + [initial[0]['stage']] * 2
-    assert all('Move directly' in e['text'] for e in plans[1:3])
+    assert [e['stage'] for e in plans[:3]] == (['baseline', 'stage1_init', 'stage1_init']
+                                               if stage == 1 else ['baseline', 'stage1_init', 'stage_2_init'])
+    assert 'Move directly' in plans[1]['text']
+    assert ('Move directly' if stage == 1 else 'posterior mean minimum') in plans[2]['text']
     assert all(np.linalg.norm(np.array(e['target']) - e['previous_readback']) <= 2 + 1e-9
                for e in plans if e['stage'] not in ('stage1_init', 'stage_2_init'))
 

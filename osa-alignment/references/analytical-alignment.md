@@ -94,13 +94,13 @@ motor units and limits that must be replaced with appropriate local values:
 | `units`, `bounds`, `max_step` | required | Adapter units, `[x_min,x_max]` and `[y_min,y_max]`, maximum Euclidean displacement for moves after random initialization, including final transit |
 | `min_step` | 0.5 | Smallest trial displacement/spacing after random initialization, in motor units; 0 disables minimum spacing while still excluding repeated positions |
 | `evaluator` | `{}` | Current-run evaluator options; omit semiaxes to fit them per image, or supply both to fix them |
-| `stage_2_entrance_m1` | 0.02 | M1 threshold for Stage 2 entry and M2 observation eligibility |
+| `stage_2_entrance_m1` | 0.02 | Threshold on the minimum M1 posterior mean for Stage 2 entry, and observed M1 for M2 eligibility |
 | `stage_1_max_acquisitions` | 15 | Stage 1 acquisition budget, including baseline; positive integer leaving at least one Stage 2 acquisition plus final confirmations |
 | `max_acquisitions` | 40 | Total budget including baseline and final confirmation images; transit moves take no images |
 | `confirmations` | 2 | Number of final reimages; at least two |
 | `readback_tolerance` | 0.001 | Maximum Euclidean readback discrepancy and per-axis allowance outside global bounds, in motor units; commanded targets remain within exact bounds |
 | `stage_2_bo_halfwidth` | [5, 5] | Half-widths of the motor search box, anchored during initialization and then centered on the M2 GP posterior-mean minimum |
-| `bo_initial_samples` | 5 | Stage 1 initial measurements including baseline, and Stage 2 eligible random measurements before EI; 0 starts EI when a training observation exists |
+| `bo_initial_samples` | 5 | Stage 1 initial measurements including baseline (must fit its budget), and Stage 2 eligible initialization measurements including entry before EI; 0 starts EI when a training observation exists |
 | `gp_length_scale` | [2.5, 2.5] | Initial Matérn-5/2 length scales and fallback before three distinct eligible locations, in motor units |
 | `gp_length_scale_bounds` | [0.5, 10] | Positive finite lower/upper bounds shared by both fitted spatial scales, in motor units |
 | `gp_noise` | 0.05 | Observation standard deviation in standardized GP target units; squared for GP alpha |
@@ -126,9 +126,13 @@ baseline, initialize the search randomly; 0 starts EI after the baseline.
 Random initialization ignores `min_step`/`max_step` and moves directly to each
 sampled target, avoiding duplicate positions and staying within global bounds.
 
-Enter Stage 2 when **either** the lowest observed M1 is at or below
-`stage_2_entrance_m1` **or** `stage_1_max_acquisitions` is exhausted. No consecutive
-entry confirmations are required. Stage 1 does not terminate on `stage_2_min_ei`; when no
+Complete all initial measurements before checking entry. Then minimize the M1 GP
+posterior mean over the global bounds after every acquisition. Enter Stage 2 when
+that minimum is at or below `stage_2_entrance_m1` or `stage_1_max_acquisitions` is
+exhausted. Measure the posterior minimum as the first Stage 2 point in either case.
+The numerical search uses a 17-by-17 grid and measured positions to seed five local
+optimizations; discrete replay minimizes over recorded positions. Entry checks log
+the predicted M1 and position. Stage 1 does not terminate on `stage_2_min_ei`; when no
 distinct candidate remains it reimages the best M1 until a transition condition
 is met. Its acquisition budget is part of `max_acquisitions`, which also reserves
 `confirmations` final images and at least one Stage 2 acquisition.
@@ -143,15 +147,16 @@ verified at every move and before/after acquisitions. Faults stop the run.
 ### Stage 2: local M2 optimization
 
 Minimize M2 in a local box. During random initialization, keep the box centered
-on the best eligible observation at Stage 2 entry. After collecting
-`bo_initial_samples` eligible random measurements at distinct motor locations,
+on the global M1 posterior-mean minimum used for the entry measurement. The entry
+measurement counts toward initialization if eligible, followed by random measurements
+at distinct motor locations. After collecting `bo_initial_samples` eligible initialization measurements,
 recenter the box on a numerical minimum of the M2 GP posterior mean each iteration. Rejected
 attempts consume the total budget. Stage 1 observations can train the
 M2 GP but do not count toward Stage 2 random initialization. An explicit M2 target
 can end Stage 2 early, subject to final confirmation.
 
 On budget entry without an eligible M2 observation, anchor the initialization
-box at the lowest observed M1 and sample randomly until initialization is complete
+box at the global M1 posterior-mean minimum and sample randomly until initialization is complete
 and an eligible M2 is available. Apply the same Stage 2 exclusions throughout.
 If the exclusions or travel limits leave
 no candidates, report that reason and return to the lowest M1 observation for

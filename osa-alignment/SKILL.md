@@ -123,9 +123,11 @@ a localized bright spot.
 
 [scripts/align_osa.py](scripts/align_osa.py) aligns the OSA in two stages.
 Stage 1 uses Bayesian optimization to minimize M1 across the full `bounds` in
-the alignment config, including finite scores from failed fits. It enters Stage 2
-as soon as either M1 meets `stage_2_entrance_m1` or `stage_1_max_acquisitions` is
-used up. The baseline counts toward the Stage 1 budget. Stage 2 uses random
+the alignment config, including finite scores from failed fits. It completes all
+initial measurements, then enters Stage 2 when the global minimum of the M1 GP
+posterior mean meets `stage_2_entrance_m1` or `stage_1_max_acquisitions` is used up.
+The first Stage 2 measurement and initial search-box center are at that minimum.
+The baseline counts toward the Stage 1 budget. Stage 2 uses random
 initialization and local Bayesian optimization to minimize M2, retaining its
 M1 eligibility constraint and neighborhood exclusions. The final position is the
 best eligible observation, verified by repeated images. If none is eligible,
@@ -142,7 +144,9 @@ exclusions. Its center stays fixed during random initialization, then follows th
 minimum of the M2 GP posterior mean. Subsequent moves respect `max_step`; distant Stage 1 BO targets and
 final returns use bounded transit moves without acquisitions.
 Set `bo_initial_samples` for both stages (Stage 1 includes the baseline; Stage 2
-counts eligible random measurements). Configure image fitting through `evaluator`. Supplying both
+counts eligible initialization measurements, including its entry measurement).
+The Stage 1 budget must accommodate `bo_initial_samples`.
+Configure image fitting through `evaluator`. Supplying both
 `inner_axes` and `outer_axes` is strongly recommended for accurate fitting.
 
 ```sh
