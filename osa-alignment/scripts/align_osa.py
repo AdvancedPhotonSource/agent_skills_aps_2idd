@@ -37,6 +37,7 @@ class Settings:
     gp_length_scale: tuple[float, float] = (2.5, 2.5)
     gp_length_scale_bounds: tuple[float, float] = (0.5, 10.)
     bo_initial_samples: int = 5
+    bo_initialization: str = "random"
     gp_noise: float = 0.05
     stage_2_gp_stage_1_noise_multiplier: float = 3.0
     ei_xi: float = 0.0
@@ -86,7 +87,14 @@ class Settings:
             raise ValueError("stage_2_target_m2 must be finite")
         if not np.isfinite(self.m2_eligibility_threshold) or self.m2_eligibility_threshold <= 0:
             raise ValueError("stage_2_eligibility_m1 must be finite and positive")
-        if self.bo_initial_samples > self.stage_1_max_acquisitions:
+        if self.bo_initialization not in {"random", "grid"}:
+            raise ValueError("bo_initialization must be 'random' or 'grid'")
+        if self.bo_initialization == "grid":
+            if self.stage_1_max_acquisitions < 17:
+                raise ValueError("Grid initialization requires a baseline plus 16 Stage 1 measurements")
+            if self.max_acquisitions < self.stage_1_max_acquisitions + 17 + self.confirmations:
+                raise ValueError("Grid initialization requires budget for Stage 2 entry plus 16 measurements and confirmations")
+        elif self.bo_initial_samples > self.stage_1_max_acquisitions:
             raise ValueError("stage_1_max_acquisitions must accommodate bo_initial_samples")
         Config(**self.evaluator).validate()
 
@@ -391,6 +399,21 @@ class Controller:
             pool = pool[[tuple(p) in reachable for p in pool]]
         return pool
 
+    def initialization_grid(self, center=None):
+        """Sixteen regular locations spanning the global or clipped entry box."""
+        bounds = np.asarray(self.s.bounds)
+        lo, hi = bounds[:, 0], bounds[:, 1]
+        if center is not None:
+            lo = np.maximum(lo, np.asarray(center) - self.s.stage_2_bo_halfwidth)
+            hi = np.minimum(hi, np.asarray(center) + self.s.stage_2_bo_halfwidth)
+        grid = np.stack(np.meshgrid(*[np.linspace(a, b, 4) for a, b in zip(lo, hi)],
+                                   indexing="ij"), axis=-1).reshape(-1, 2)
+        if hasattr(self.backend, "candidate_positions"):
+            available = np.asarray(self.backend.candidate_positions)
+            if not all(np.any(np.all(available == point, axis=1)) for point in grid):
+                raise ValueError("Initialization grid requires all 16 locations to be available in the backend")
+        return grid
+
     def replay_routes(self):
         """Find recorded waypoints reachable by moves no longer than max_step."""
         bounds = np.asarray(self.s.bounds)
@@ -437,12 +460,20 @@ class Controller:
         bo_started = False
         try:
             bounds = np.asarray(self.s.bounds)
+            grid_mode = self.s.bo_initialization == "grid"
+            stage1_grid = self.initialization_grid() if grid_mode else None
+            stage1_grid_count, stage2_grid_count = 0, 0
             baseline_target = np.clip(self.position(), bounds[:, 0], bounds[:, 1])
             incumbent = self.acquire(baseline_target, "Acquire baseline before choosing a move.", "baseline")
             stage, initial_samples = "stage1", 0
             while self.acquisitions < self.s.max_acquisitions - self.s.confirmations:
                 primary_best = self.best_observed(False)
                 if stage == "stage1":
+                    if grid_mode and stage1_grid_count < len(stage1_grid):
+                        self.acquire(stage1_grid[stage1_grid_count],
+                                     f"Measure M1 initialization grid location {stage1_grid_count + 1}/16.", "stage1_init")
+                        stage1_grid_count += 1
+                        continue
                     gp, fitted = fit_objective(self.history, self.s, "primary_metric")
                     self.record("bo_model", stage=stage, objective="primary_metric",
                                 length_scales=np.asarray(gp.kernel_.length_scale).tolist(),
@@ -450,7 +481,7 @@ class Controller:
                                 training_acquisitions=[o["acquisition"] for o in
                                     objective_observations(self.history, self.s, "primary_metric")],
                                 exclusion_acquisitions=[])
-                    if self.acquisitions >= self.s.bo_initial_samples:
+                    if grid_mode or self.acquisitions >= self.s.bo_initial_samples:
                         stage2_center = self.posterior_mean_center(gp)
                         predicted_m1 = float(gp.predict(stage2_center[None, :])[0])
                         threshold_met = predicted_m1 <= self.s.stage_2_entrance_m1
@@ -466,7 +497,9 @@ class Controller:
                                         position=stage2_center.tolist(), posterior_mean_m1=predicted_m1)
                             self.record("search_box", stage=stage, center=stage2_center.tolist(),
                                         centering="initialization_anchor")
-                            acquisition_stage = "stage_2_init" if self.s.bo_initial_samples else "stage_2"
+                            if grid_mode:
+                                stage2_grid = self.initialization_grid(stage2_center)
+                            acquisition_stage = "stage_2_init" if grid_mode or self.s.bo_initial_samples else "stage_2"
                             if acquisition_stage == "stage_2":
                                 self.travel_to(stage2_center)
                             obs = self.acquire(stage2_center, "Measure Stage 2 entry at the M1 posterior mean minimum.",
@@ -474,12 +507,13 @@ class Controller:
                             if acquisition_stage == "stage_2_init" and feasible(obs, self.s):
                                 initial_samples += 1
                             continue
-                    pool = self.stage1_candidates(initial=self.acquisitions < self.s.bo_initial_samples)
+                    random_initializing = not grid_mode and self.acquisitions < self.s.bo_initial_samples
+                    pool = self.stage1_candidates(initial=random_initializing)
                     if not len(pool):
                         # A discrete or very small domain can be fully sampled before the budget.
                         trial = np.asarray(primary_best["target"])
                         plan, acquisition_stage = "Reimage best M1 after exhausting distinct Stage 1 candidates.", "stage1"
-                    elif self.acquisitions < self.s.bo_initial_samples:
+                    elif random_initializing:
                         trial = pool[self.rng.integers(len(pool))]
                         plan, acquisition_stage = f"Move directly to random M1 initialization target {trial.tolist()}.", "stage1_init"
                     else:
@@ -493,6 +527,15 @@ class Controller:
 
                 # Stage 2 can start on budget exhaustion before any eligible M2 exists.
                 incumbent = self.best or primary_best
+                if grid_mode and stage2_grid_count < len(stage2_grid):
+                    self.record("search_box", stage="stage_2", center=stage2_center.tolist(),
+                                centering="initialization_anchor")
+                    obs = self.acquire(stage2_grid[stage2_grid_count],
+                                       f"Measure M2 initialization grid location {stage2_grid_count + 1}/16.", "stage_2_init")
+                    stage2_grid_count += 1
+                    if feasible(obs, self.s):
+                        initial_samples += 1
+                    continue
                 if (self.best is not None and self.s.stage_2_target_m2 is not None
                     and float(self.best["metrics"]["secondary_metric"]) <= self.s.stage_2_target_m2):
                     reason = "requested metric target reached"
@@ -508,7 +551,10 @@ class Controller:
                                 initial_samples=initial_samples,
                                 exclusion_acquisitions=[o["acquisition"] for o in self.history
                                     if not eligible_geometry(o, self.s)])
-                initializing = initial_samples < self.s.bo_initial_samples or gp is None
+                if grid_mode and gp is None:
+                    reason = "grid initialization completed without eligible M2 observations"
+                    break
+                initializing = not grid_mode and (initial_samples < self.s.bo_initial_samples or gp is None)
                 if not initializing:
                     stage2_center = self.posterior_mean_center(gp, stage2_center)
                 self.record("search_box", stage="stage_2", center=stage2_center.tolist(),
@@ -516,7 +562,7 @@ class Controller:
                 pool = self.candidates({'position': stage2_center}, initial=initializing)
                 if not len(pool):
                     reason = "no sampleable candidates after travel, spacing, and M1 exclusions"
-                    if initial_samples < self.s.bo_initial_samples or gp is None:
+                    if initializing:
                         reason += "; random initialization incomplete"
                     break
                 if initializing:
@@ -535,7 +581,7 @@ class Controller:
                 obs = self.acquire(trial, plan, acquisition_stage)
                 if acquisition_stage == "stage_2_init" and feasible(obs, self.s):
                     initial_samples += 1
-            if stage == "stage_2" and initial_samples < self.s.bo_initial_samples and reason == "budget exhausted":
+            if not grid_mode and stage == "stage_2" and initial_samples < self.s.bo_initial_samples and reason == "budget exhausted":
                 reason = "random initialization budget exhausted"
             incumbent = self.best_observed(bo_started) or self.best_observed(False) or incumbent
             self.return_to_best(incumbent)

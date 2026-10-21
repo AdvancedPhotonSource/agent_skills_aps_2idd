@@ -104,6 +104,7 @@ motor units and limits that must be replaced with appropriate local values:
 | `readback_tolerance` | 0.001 | Maximum Euclidean readback discrepancy and per-axis allowance outside global bounds, in motor units; commanded targets remain within exact bounds |
 | `stage_2_bo_halfwidth` | [5, 5] | Half-widths of the motor search box, anchored during initialization and then centered on the M2 GP posterior-mean minimum |
 | `bo_initial_samples` | 5 | Stage 1 initial measurements including baseline (must fit its budget), and Stage 2 eligible initialization measurements including entry before EI; 0 starts EI when a training observation exists |
+| `bo_initialization` | `random` | `random` uses `bo_initial_samples`; `grid` measures a regular 4×4 initialization grid in each stage, plus baseline and Stage 2 entry |
 | `gp_length_scale` | [2.5, 2.5] | Initial Matérn-5/2 length scales and fallback before three distinct eligible locations, in motor units |
 | `gp_length_scale_bounds` | [0.5, 10] | Positive finite lower/upper bounds shared by both fitted spatial scales, in motor units |
 | `gp_noise` | 0.05 | Observation standard deviation in standardized GP target units; squared for GP alpha |
@@ -126,10 +127,22 @@ Minimize M1 using a Matérn-5/2 Gaussian process and expected improvement over t
 full configured `bounds`. `stage_2_bo_halfwidth` and Stage 2 M1 neighborhood exclusions
 do not restrict this domain. All finite M1 observations train this GP, including
 failed fits and scores above the entry threshold. Use `gp_noise` to tolerate
-uncertain scores. The first `bo_initial_samples` measurements, counting the
+uncertain scores. With `bo_initialization: "random"`, the first `bo_initial_samples` measurements, counting the
 baseline, initialize the search randomly; 0 starts EI after the baseline.
 Random initialization ignores `min_step`/`max_step` and moves directly to each
 sampled target, avoiding duplicate positions and staying within global bounds.
+
+With `bo_initialization: "grid"`, measure all 16 points of a regular 4×4 grid
+spanning the global bounds after the baseline. Coordinates include both endpoints
+of each axis and are visited in x-major order. Stage 2 measures its posterior-minimum
+entry point, then a 4×4 grid spanning the clipped entry box. Both grids are completed
+regardless of observed M1; M2 eligibility remains active for training and selection.
+Grid initialization bypasses M1 neighborhood exclusions and step limits. Subsequent
+BO applies the usual exclusions and adapts the box. `bo_initial_samples` is ignored
+in this mode. Require `stage_1_max_acquisitions >= 17` and
+`max_acquisitions >= stage_1_max_acquisitions + 17 + confirmations`. Recorded
+backends must contain every grid location. The grids are measured even when a
+location coincides with an earlier baseline, entry, or Stage 1 observation.
 
 Complete all initial measurements before checking entry. Then minimize the M1 GP
 posterior mean over the global bounds after every acquisition. Enter Stage 2 when
@@ -396,7 +409,7 @@ gets a unique filename so repeated confirmations retain separate files.
 ## Logs and outcomes
 
 Observation stages are `baseline`, `stage1_init`, `stage1`, `stage_2_init`,
-`stage_2`, and `final`. The `_init` stages identify random initialization;
+`stage_2`, and `final`. The `_init` stages identify initialization measurements;
 `stage1` and `stage_2` identify Bayesian optimization of M1 and M2, respectively.
 Stage 2 transition and model records also use `stage_2`.
 

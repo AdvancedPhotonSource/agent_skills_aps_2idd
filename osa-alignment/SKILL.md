@@ -127,7 +127,7 @@ the alignment config, including finite scores from failed fits. It completes all
 initial measurements, then enters Stage 2 when the global minimum of the M1 GP
 posterior mean meets `stage_2_entrance_m1` or `stage_1_max_acquisitions` is used up.
 The first Stage 2 measurement and initial search-box center are at that minimum.
-The baseline counts toward the Stage 1 budget. Stage 2 uses random
+The baseline counts toward the Stage 1 budget. Stage 2 uses configurable
 initialization and local Bayesian optimization to minimize M2, retaining its
 M1 eligibility constraint and neighborhood exclusions. The final position is the
 best eligible observation, verified by repeated images. If none is eligible,
@@ -148,6 +148,15 @@ final returns use bounded transit moves without acquisitions.
 Set `bo_initial_samples` for both stages (Stage 1 includes the baseline; Stage 2
 counts eligible initialization measurements, including its entry measurement).
 The Stage 1 budget must accommodate `bo_initial_samples`.
+Set `bo_initialization` to `random` (default) or `grid`. Grid initialization
+measures a regular 4×4 grid spanning each stage's bounds, in addition to the
+baseline and Stage 2 entry measurement. Stage 2 uses the clipped entry box and
+completes all 16 grid measurements before adapting it. Grid initialization moves
+directly to each location and measures even inside M1 exclusions; M2 eligibility
+still controls GP training and final selection. `bo_initial_samples` applies to
+random mode. Grid mode requires a Stage 1 budget of at least 17 and a total budget
+of at least `stage_1_max_acquisitions + 17 + confirmations`. Recorded backends
+must provide every grid location.
 Set `stage_1_grid_spacing` and `stage_2_grid_spacing` for the acquisition candidate
 grids (defaults: 1 and 0.1 in motor units, respectively). Stage 1 covers the global
 bounds; Stage 2 covers its clipped local box. EI is evaluated at every surviving
