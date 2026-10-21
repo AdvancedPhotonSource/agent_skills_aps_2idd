@@ -43,10 +43,11 @@ def test_live_updates_partial_records_and_read_only_routes(tmp_path):
         assert len(first["observations"]) == 1
         assert first["observations"][0]["metrics"]["primary_metric"] == .01
         assert first["image"].startswith("data:image/png;base64,")
-        controller.acquire([1, 0], "Next trial", "bo")
+        controller.acquire([1, 0], "Next trial", "stage_2")
         second = json.load(request(dashboard))
         assert len(second["observations"]) == 2
         assert second["observations"][-1]["position"] == [1, 0]
+        assert second["observations"][-1]["stage"] == "stage_2"
         with controller.log_path.open("a") as stream:
             stream.write('{"event":')
         assert json.load(request(dashboard))["observations"] == second["observations"]

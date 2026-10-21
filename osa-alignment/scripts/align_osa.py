@@ -217,7 +217,7 @@ class Controller:
             raise RuntimeError("Acquisition budget exhausted")
         target = np.asarray(target, float)
         actual = self.move(target, plan, stage,
-                           limit_step=stage not in {"stage1_init", "bo_init"})
+                           limit_step=stage not in {"stage1_init", "stage_2_init"})
         self.acquisitions += 1
         image = self.backend.acquire_image()
         after = self.position()
@@ -366,8 +366,8 @@ class Controller:
                     threshold_met = float(primary_best["metrics"]["primary_metric"]) <= self.s.stage_2_entrance_m1
                     budget_met = self.acquisitions >= self.s.stage_1_max_acquisitions
                     if threshold_met or budget_met:
-                        stage, bo_started = "bo", True
-                        self.record("stage_transition", stage="bo", from_stage="stage1",
+                        stage, bo_started = "stage_2", True
+                        self.record("stage_transition", stage="stage_2", from_stage="stage1",
                                     reason="M1 threshold reached" if threshold_met else "stage 1 budget exhausted",
                                     stage1_acquisitions=self.acquisitions)
                 if stage == "stage1":
@@ -404,7 +404,7 @@ class Controller:
                 if self.best is not None:
                     gp, fitted = fit_objective(self.history, self.s)
                     self.length_scales = np.asarray(gp.kernel_.length_scale)
-                    self.record("bo_model", stage="bo", objective="secondary_metric",
+                    self.record("bo_model", stage="stage_2", objective="secondary_metric",
                                 length_scales=self.length_scales.tolist(),
                                 length_scales_fitted=fitted, training_count=len(gp.X_train_),
                                 training_acquisitions=[o["acquisition"] for o in self.history if feasible(o, self.s)],
@@ -422,7 +422,7 @@ class Controller:
                     trial = pool[self.rng.integers(len(pool))]
                     plan = (f"Move directly to random M2 initialization target {trial.tolist()}; "
                             f"{initial_samples + 1}/{self.s.bo_initial_samples} eligible locations.")
-                    acquisition_stage = "bo_init"
+                    acquisition_stage = "stage_2_init"
                 else:
                     scores = expected_improvement(gp, pool, float(incumbent["metrics"]["secondary_metric"]), self.s)
                     if scores.max() <= self.s.stage_2_min_ei:
@@ -430,11 +430,11 @@ class Controller:
                         break
                     trial = pool[np.argmax(scores)]
                     plan = f"Local M2 BO trial at {trial.tolist()}; EI={scores.max():.5g}."
-                    acquisition_stage = "bo"
+                    acquisition_stage = "stage_2"
                 obs = self.acquire(trial, plan, acquisition_stage)
-                if acquisition_stage == "bo_init" and feasible(obs, self.s):
+                if acquisition_stage == "stage_2_init" and feasible(obs, self.s):
                     initial_samples += 1
-            if stage == "bo" and initial_samples < self.s.bo_initial_samples and reason == "budget exhausted":
+            if stage == "stage_2" and initial_samples < self.s.bo_initial_samples and reason == "budget exhausted":
                 reason = "random initialization budget exhausted"
             incumbent = self.best_observed(bo_started) or self.best_observed(False) or incumbent
             self.return_to_best(incumbent)

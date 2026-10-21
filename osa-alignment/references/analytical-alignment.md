@@ -368,6 +368,11 @@ gets a unique filename so repeated confirmations retain separate files.
 
 ## Logs and outcomes
 
+Observation stages are `baseline`, `stage1_init`, `stage1`, `stage_2_init`,
+`stage_2`, and `final`. The `_init` stages identify random initialization;
+`stage1` and `stage_2` identify Bayesian optimization of M1 and M2, respectively.
+Stage 2 transition and model records also use `stage_2`.
+
 Every acquisition logs measured position, commanded target, metrics, image path, a textual observation, a comparison with the preceding image,
 and a next-plan statement. Descriptions include boundary coverage, unsupported
 arc lengths, hole mean and peak, and left/right/top/bottom ring brightness when

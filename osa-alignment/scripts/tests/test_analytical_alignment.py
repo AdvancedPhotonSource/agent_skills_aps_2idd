@@ -62,7 +62,7 @@ def test_gp_uses_only_eligible_objectives():
 
 def test_gp_noise_tracks_eligible_observation_stages():
     observations = []
-    stages = ['baseline', 'stage1', 'stage1_init', 'bo_init', 'bo', 'final', None]
+    stages = ['baseline', 'stage1', 'stage1_init', 'stage_2_init', 'stage_2', 'final', None]
     for stage in stages:
         obs = observation([0, 0])
         if stage is not None:
@@ -80,7 +80,7 @@ def test_stage1_noise_reduces_influence_on_gp_prediction():
     stage1.update(stage='stage1')
     stage1['metrics']['secondary_metric'] = 2.
     fine = observation([0, 0])
-    fine.update(stage='bo')
+    fine.update(stage='stage_2')
     fine['metrics']['secondary_metric'] = 0.
     equal, _ = fit_objective([stage1, fine], settings(stage_2_gp_stage_1_noise_multiplier=1.))
     weighted, _ = fit_objective([stage1, fine], settings())
@@ -234,14 +234,15 @@ def test_initialization_counts_eligible_random_measurements_and_reuses_stage1(tm
     points = iter([[1, 0], [-1, 0], [-2, 0], [-2, 1], [-1, 1], [0, 1], [0, 2], [1, 2]])
     monkeypatch.setattr(c, 'candidates', lambda incumbent, **kwargs: np.array([next(points)], float))
     result = c.run()
-    initial = [o for o in c.history if o['stage'] == 'bo_init']
+    initial = [o for o in c.history if o['stage'] == 'stage_2_init']
     assert len(initial) == 6
     assert sum(o['bo_eligible'] for o in initial) == 5
     assert len({tuple(o['position']) for o in initial}) == 6
     assert initial[0]['bo_rejection_reason'] == 'invalid fit'
-    assert [o['stage'] for o in c.history] == ['baseline'] + ['bo_init'] * 6 + ['bo'] * 2 + ['final'] * 2
+    assert [o['stage'] for o in c.history] == ['baseline'] + ['stage_2_init'] * 6 + ['stage_2'] * 2 + ['final'] * 2
     assert result['final_readback'] == [0, 0]
     models = [e for e in map(json.loads, (tmp_path / 'log').read_text().splitlines()) if e['event'] == 'bo_model']
+    assert all(e['stage'] == 'stage_2' for e in models)
     assert models[-1]['training_acquisitions'] == [1, 3, 4, 5, 6, 7, 8]
     assert models[-1]['exclusion_acquisitions'] == [2]
     assert result['acquisitions'] == 11
@@ -262,7 +263,7 @@ def test_initialization_budget_exhaustion_reserves_final_confirmations(tmp_path,
     assert result['acquisitions'] == 8
     assert result['status'] == 'best_found'
     assert [o['stage'] for o in c.history[-2:]] == ['final', 'final']
-    assert not any(o['stage'] in ('restore', 'bo') for o in c.history)
+    assert not any(o['stage'] in ('restore', 'stage_2') for o in c.history)
 
 
 def test_exclusions_use_current_anisotropic_scales_and_actual_readback(tmp_path):
@@ -366,8 +367,8 @@ def test_zero_random_samples_enters_ei_directly(tmp_path):
     c = Controller(settings(stage_2_target_m2=None, bo_initial_samples=0, max_acquisitions=6),
                    SyntheticBackend([0, 0]), tmp_path / 'log', lambda p: observation(p))
     c.run()
-    assert c.history[1]['stage'] == 'bo'
-    assert not any(o['stage'] == 'bo_init' for o in c.history)
+    assert c.history[1]['stage'] == 'stage_2'
+    assert not any(o['stage'] == 'stage_2_init' for o in c.history)
 
 
 @pytest.mark.parametrize('metric', ['primary_metric', 'secondary_metric'])
@@ -422,10 +423,11 @@ def test_m1_threshold_enters_stage2_without_entry_confirmations(tmp_path, invali
     c.run()
     transitions = [e for e in events(c) if e['event'] == 'stage_transition']
     assert len(transitions) == 1
+    assert transitions[0]['stage'] == 'stage_2'
     assert transitions[0]['reason'] == 'M1 threshold reached'
     assert transitions[0]['stage1_acquisitions'] == 1
     assert not any(o['stage'] in ('stage1', 'stage1_init', 'confirm') for o in c.history)
-    assert c.history[1]['stage'] == 'bo_init'
+    assert c.history[1]['stage'] == 'stage_2_init'
 
 
 def test_stage1_budget_enters_stage2_without_eligible_m2(tmp_path, monkeypatch):
@@ -444,7 +446,7 @@ def test_stage1_budget_enters_stage2_without_eligible_m2(tmp_path, monkeypatch):
     monkeypatch.setattr(c, 'candidates', lambda incumbent, **kwargs: next(pools))
     result = c.run()
     assert result['status'] == 'best_found'
-    assert [o['stage'] for o in c.history] == ['baseline', 'stage1', 'bo_init', 'final', 'final']
+    assert [o['stage'] for o in c.history] == ['baseline', 'stage1', 'stage_2_init', 'final', 'final']
     transition = next(e for e in events(c) if e['event'] == 'stage_transition')
     assert transition['reason'] == 'stage 1 budget exhausted'
     assert transition['stage1_acquisitions'] == 2
@@ -491,7 +493,7 @@ def test_stage1_global_search_optimizes_m1_and_uses_bounded_transits(tmp_path, r
     assert c.acquisitions <= 16
     moves = [e for e in events(c) if e['event'] == 'plan']
     assert all(np.linalg.norm(np.array(e['target']) - e['previous_readback']) <= 3 + 1e-9
-               for e in moves if e['stage'] not in ('stage1_init', 'bo_init'))
+               for e in moves if e['stage'] not in ('stage1_init', 'stage_2_init'))
     assert any(e['stage'] == 'transit' for e in moves)
     assert not any(o['stage'] == 'restore' for o in c.history)
 
@@ -673,7 +675,7 @@ def test_random_acquisitions_move_directly_to_near_and_far_targets(tmp_path, sta
                    backend, tmp_path / 'log', measured)
     result = c.run()
     assert result['status'] == ('unconfirmed' if stage == 1 else 'best_found')
-    initial = [o for o in c.history if o['stage'] == ('stage1_init' if stage == 1 else 'bo_init')]
+    initial = [o for o in c.history if o['stage'] == ('stage1_init' if stage == 1 else 'stage_2_init')]
     assert len(initial) == 2
     np.testing.assert_array_equal([o['position'] for o in initial], [[12, 0], [.25, 0]])
     assert backend.acquisitions == 5
@@ -683,7 +685,7 @@ def test_random_acquisitions_move_directly_to_near_and_far_targets(tmp_path, sta
     assert [e['stage'] for e in plans[:3]] == ['baseline'] + [initial[0]['stage']] * 2
     assert all('Move directly' in e['text'] for e in plans[1:3])
     assert all(np.linalg.norm(np.array(e['target']) - e['previous_readback']) <= 2 + 1e-9
-               for e in plans if e['stage'] not in ('stage1_init', 'bo_init'))
+               for e in plans if e['stage'] not in ('stage1_init', 'stage_2_init'))
 
 
 def test_stage2_random_replay_allows_direct_moves_to_distant_recorded_locations(tmp_path):
@@ -696,7 +698,7 @@ def test_stage2_random_replay_allows_direct_moves_to_distant_recorded_locations(
     np.testing.assert_array_equal(pool, [[.25, 0], [3, 0], [6, 0], [12, 0]])
 
 
-@pytest.mark.parametrize('stage', ['stage1_init', 'bo_init'])
+@pytest.mark.parametrize('stage', ['stage1_init', 'stage_2_init'])
 def test_initial_moves_still_enforce_global_bounds_and_readbacks(tmp_path, stage):
     backend = SyntheticBackend([0, 0])
     c = Controller(settings(max_step=2), backend, tmp_path / 'log', observation)
@@ -706,7 +708,7 @@ def test_initial_moves_still_enforce_global_bounds_and_readbacks(tmp_path, stage
     assert backend.acquisitions == 0
     # The physical step limit still applies outside initialization.
     with pytest.raises(RuntimeError, match='maximum displacement'):
-        c.acquire([12, 0], 'Normal BO', 'bo')
+        c.acquire([12, 0], 'Normal BO', 'stage_2')
     assert backend.moves == []
 
     class Faulty(SyntheticBackend):
