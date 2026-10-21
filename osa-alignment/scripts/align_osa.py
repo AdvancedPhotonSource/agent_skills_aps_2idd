@@ -40,12 +40,17 @@ class Settings:
     stage_2_gp_stage_1_noise_multiplier: float = 3.0
     ei_xi: float = 0.0
     stage_2_min_ei: float = 0.0
-    bo_candidates: int = 256
+    stage_1_grid_spacing: float = 1.0
+    stage_2_grid_spacing: float = 0.1
+    bo_candidates: int | None = None  # Accepted for older configs; grids determine candidate counts.
     stage_2_target_m2: float | None = None
     seed: int = 0
 
     def validate(self):
         bounds = np.asarray(self.bounds, float)
+        if (not np.isfinite([self.stage_1_grid_spacing, self.stage_2_grid_spacing]).all()
+            or min(self.stage_1_grid_spacing, self.stage_2_grid_spacing) <= 0):
+            raise ValueError("Grid spacings must be finite and positive")
         if (not np.isfinite([self.min_step, self.max_step]).all()
             or self.max_step <= 0 or not 0 <= self.min_step <= self.max_step):
             raise ValueError("Require max_step > 0 and 0 <= min_step <= max_step")
@@ -67,11 +72,11 @@ class Settings:
             or min(self.ei_xi, self.stage_2_min_ei) < 0):
             raise ValueError("Invalid bounds, thresholds, step sizes, or GP settings")
         if (not all(isinstance(x, int) for x in [self.max_acquisitions, self.confirmations,
-                                               self.bo_candidates, self.bo_initial_samples, self.stage_1_max_acquisitions, self.seed])
+                                               self.bo_initial_samples, self.stage_1_max_acquisitions, self.seed])
             or self.confirmations < 2 or self.max_acquisitions < self.confirmations + 3
             or not 1 <= self.stage_1_max_acquisitions < self.max_acquisitions - self.confirmations
-            or self.bo_initial_samples < 0 or self.bo_candidates < 4 or self.seed < 0):
-            raise ValueError("Require >=2 confirmations, sufficient acquisition budget, and >=4 candidates")
+            or self.bo_initial_samples < 0 or self.seed < 0):
+            raise ValueError("Require >=2 confirmations and sufficient acquisition budget")
         if self.stage_2_target_m2 is not None and not np.isfinite(self.stage_2_target_m2):
             raise ValueError("stage_2_target_m2 must be finite")
         if self.bo_initial_samples > self.stage_1_max_acquisitions:
@@ -151,6 +156,19 @@ def expected_improvement(gp, candidates, best_value, settings):
     improvement = best_value - mu - settings.ei_xi
     z = improvement / std
     return np.maximum(improvement * norm.cdf(z) + std * norm.pdf(z), 0)
+
+
+def candidate_grid(lo, hi, spacing):
+    """Grid anchored at the lower bounds, including both edges on each axis."""
+    axes = []
+    for a, b in zip(lo, hi):
+        axis = a + spacing * np.arange(int(np.floor((b - a) / spacing)) + 1)
+        if np.isclose(axis[-1], b, rtol=0, atol=1e-10):
+            axis[-1] = b
+        else:
+            axis = np.append(axis, b)
+        axes.append(axis)
+    return np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 2)
 
 
 class Controller:
@@ -278,7 +296,7 @@ class Controller:
         else:
             lo = np.maximum(bounds[:, 0], p - self.s.stage_2_bo_halfwidth)
             hi = np.minimum(bounds[:, 1], p + self.s.stage_2_bo_halfwidth)
-            pool = self.rng.uniform(lo, hi, (self.s.bo_candidates, 2))
+            pool = candidate_grid(lo, hi, self.s.stage_2_grid_spacing)
         allowed = np.all((pool >= bounds[:, 0]) & (pool <= bounds[:, 1]), axis=1)
         if not initial:
             distance = np.linalg.norm(pool - self.position(), axis=1)
@@ -354,7 +372,7 @@ class Controller:
         bounds = np.asarray(self.s.bounds)
         pool = (np.asarray(self.backend.candidate_positions, float)
                 if hasattr(self.backend, "candidate_positions") else
-                self.rng.uniform(bounds[:, 0], bounds[:, 1], (self.s.bo_candidates, 2)))
+                candidate_grid(bounds[:, 0], bounds[:, 1], self.s.stage_1_grid_spacing))
         allowed = np.all((pool >= bounds[:, 0]) & (pool <= bounds[:, 1]), axis=1)
         pool = pool[allowed]
         if len(pool) and self.history:

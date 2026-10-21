@@ -18,5 +18,7 @@
   "stage_1_max_acquisitions": 30,
   "stage_2_bo_halfwidth": [5, 5],
   "bo_initial_samples": 10,
+  "stage_1_grid_spacing": 1.0,
+  "stage_2_grid_spacing": 0.1,
   "gp_noise": 0.02
 }

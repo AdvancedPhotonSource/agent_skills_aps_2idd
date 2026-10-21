@@ -83,6 +83,8 @@ motor units and limits that must be replaced with appropriate local values:
   "confirmations": 2,
   "stage_2_bo_halfwidth": [5, 5],
   "bo_initial_samples": 5,
+  "stage_1_grid_spacing": 1.0,
+  "stage_2_grid_spacing": 0.1,
   "gp_length_scale": [2.5, 2.5],
   "gp_length_scale_bounds": [0.5, 10],
   "gp_noise": 0.05
@@ -105,11 +107,13 @@ motor units and limits that must be replaced with appropriate local values:
 | `gp_length_scale_bounds` | [0.5, 10] | Positive finite lower/upper bounds shared by both fitted spatial scales, in motor units |
 | `gp_noise` | 0.05 | Observation standard deviation in standardized GP target units; squared for GP alpha |
 | `stage_2_gp_stage_1_noise_multiplier` | 3 | Multiplier on M2 GP noise for baseline and Stage 1 observations; finite and at least 1; default gives nine times the variance |
-| `bo_candidates` | 256 | Random candidate count per continuous BO iteration |
+| `stage_1_grid_spacing` | 1.0 | Candidate grid spacing along both axes over the global bounds, in motor units (µm for `units: "um"`) |
+| `stage_2_grid_spacing` | 0.1 | Candidate grid spacing along both axes within the current clipped local box, in motor units |
+| `bo_candidates` | null | Legacy field accepted when loading older configs; candidate counts are determined by the grid spacings |
 | `ei_xi` | 0 | EI improvement margin in the current objective's units (M1 or M2) |
 | `stage_2_min_ei` | 0 | Stop if maximum EI is at most this value, in M2 units |
 | `stage_2_target_m2` | null | Optional absolute M2 target under consistent acquisition conditions |
-| `seed` | 0 | Random seed for reproducible candidate generation |
+| `seed` | 0 | Random seed for reproducible initialization selections |
 
 Set bounds and `max_step` for the current instrument. All settings are recorded at
 the beginning of the trajectory. Thresholds are prototype settings to qualify
@@ -137,7 +141,13 @@ distinct candidate remains it reimages the best M1 until a transition condition
 is met. Its acquisition budget is part of `max_acquisitions`, which also reserves
 `confirmations` final images and at least one Stage 2 acquisition.
 
-Continuous proposals cover the global bounds. After random initialization,
+Candidate grids cover the global bounds in Stage 1 and the clipped local box in
+Stage 2. Both spacings must be finite and positive. Grids start at the lower bounds
+and include the upper bounds; the last interval can be shorter than the configured
+spacing. Evaluate EI at every surviving grid point. Random initialization chooses
+uniformly among surviving grid points. Recorded replay uses its available positions.
+The posterior-mean minimization used for entry and box centering retains its separate
+grid and local optimization. After random initialization,
 exclude measured positions within `min_step`. Subsequent BO targets farther
 than `max_step` use successive bounded transit moves without images. After
 initialization, exact-grid replay uses recorded locations connected by bounded

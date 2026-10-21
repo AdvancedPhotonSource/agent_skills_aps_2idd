@@ -146,6 +146,11 @@ final returns use bounded transit moves without acquisitions.
 Set `bo_initial_samples` for both stages (Stage 1 includes the baseline; Stage 2
 counts eligible initialization measurements, including its entry measurement).
 The Stage 1 budget must accommodate `bo_initial_samples`.
+Set `stage_1_grid_spacing` and `stage_2_grid_spacing` for the acquisition candidate
+grids (defaults: 1 and 0.1 in motor units, respectively). Stage 1 covers the global
+bounds; Stage 2 covers its clipped local box. EI is evaluated at every surviving
+grid point, and initialization samples randomly from that grid. Recorded replay
+uses its available positions.
 Configure image fitting through `evaluator`. Supplying both
 `inner_axes` and `outer_axes` is strongly recommended for accurate fitting.
 
