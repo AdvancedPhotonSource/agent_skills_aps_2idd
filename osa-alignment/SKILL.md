@@ -132,6 +132,8 @@ initialization and local Bayesian optimization to minimize M2, retaining its
 M1 eligibility constraint and neighborhood exclusions. The final position is the
 best eligible observation, verified by repeated images. If none is eligible,
 return to the lowest observed M1 and report an unconfirmed result.
+Set `stage_2_eligibility_m1` to control M2 eligibility and exclusions separately
+from the entrance threshold; when omitted, it uses `stage_2_entrance_m1`.
 
 No calibration file, centroid vector, reference center, Jacobian, or eta is used.
 The bundled [alignment settings](scripts/alignment.json) allocate 15 of the 40

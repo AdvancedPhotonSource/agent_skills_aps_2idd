@@ -28,6 +28,7 @@ class Settings:
     min_step: float = 0.5
     evaluator: dict = field(default_factory=dict)
     stage_2_entrance_m1: float = 0.02
+    stage_2_eligibility_m1: float | None = None
     stage_1_max_acquisitions: int = 15
     max_acquisitions: int = 40
     confirmations: int = 2
@@ -45,6 +46,10 @@ class Settings:
     bo_candidates: int | None = None  # Accepted for older configs; grids determine candidate counts.
     stage_2_target_m2: float | None = None
     seed: int = 0
+
+    @property
+    def m2_eligibility_threshold(self):
+        return self.stage_2_entrance_m1 if self.stage_2_eligibility_m1 is None else self.stage_2_eligibility_m1
 
     def validate(self):
         bounds = np.asarray(self.bounds, float)
@@ -79,6 +84,8 @@ class Settings:
             raise ValueError("Require >=2 confirmations and sufficient acquisition budget")
         if self.stage_2_target_m2 is not None and not np.isfinite(self.stage_2_target_m2):
             raise ValueError("stage_2_target_m2 must be finite")
+        if not np.isfinite(self.m2_eligibility_threshold) or self.m2_eligibility_threshold <= 0:
+            raise ValueError("stage_2_eligibility_m1 must be finite and positive")
         if self.bo_initial_samples > self.stage_1_max_acquisitions:
             raise ValueError("stage_1_max_acquisitions must accommodate bo_initial_samples")
         Config(**self.evaluator).validate()
@@ -114,7 +121,7 @@ class Replay:
 def eligible_geometry(observation, settings):
     m = observation["metrics"]
     m1 = float(m["primary_metric"])
-    return bool(m["valid"] and np.isfinite(m1) and m1 <= settings.stage_2_entrance_m1)
+    return bool(m["valid"] and np.isfinite(m1) and m1 <= settings.m2_eligibility_threshold)
 
 
 def feasible(observation, settings):
@@ -270,7 +277,7 @@ class Controller:
         eligible = feasible(obs, self.s)
         if not m["valid"]:
             rejection = "invalid fit"
-        elif not np.isfinite(float(m["primary_metric"])) or float(m["primary_metric"]) > self.s.stage_2_entrance_m1:
+        elif not np.isfinite(float(m["primary_metric"])) or float(m["primary_metric"]) > self.s.m2_eligibility_threshold:
             rejection = "M1 exceeds BO threshold or is nonfinite"
         elif not np.isfinite(float(m["secondary_metric"])):
             rejection = "nonfinite M2"
