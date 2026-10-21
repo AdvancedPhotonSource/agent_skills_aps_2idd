@@ -105,6 +105,7 @@ motor units and limits that must be replaced with appropriate local values:
 | `stage_2_bo_halfwidth` | [5, 5] | Half-widths of the motor search box, anchored during initialization and then centered on the M2 GP posterior-mean minimum |
 | `bo_initial_samples` | 5 | Stage 1 initial measurements including baseline (must fit its budget), and Stage 2 eligible initialization measurements including entry before EI; 0 starts EI when a training observation exists |
 | `bo_initialization` | `random` | `random` uses `bo_initial_samples`; `grid` measures a regular 4×4 initialization grid in each stage, plus baseline and Stage 2 entry |
+| `stage_1_optimizer` | `bo` | `bo` uses the M1 GP and EI; `quadratic` requires grid initialization, refits a full M1 quadratic after each image, and measures its bounded minimum until the Stage 1 budget |
 | `gp_length_scale` | [2.5, 2.5] | Initial Matérn-5/2 length scales and fallback before three distinct eligible locations, in motor units |
 | `gp_length_scale_bounds` | [0.5, 10] | Positive finite lower/upper bounds shared by both fitted spatial scales, in motor units |
 | `gp_noise` | 0.05 | Observation standard deviation in standardized GP target units; squared for GP alpha |
@@ -134,7 +135,7 @@ sampled target, avoiding duplicate positions and staying within global bounds.
 
 With `bo_initialization: "grid"`, measure all 16 points of a regular 4×4 grid
 spanning the global bounds after the baseline. Coordinates include both endpoints
-of each axis and are visited in x-major order. Stage 2 measures its posterior-minimum
+of each axis and are visited in x-major order. Stage 2 measures its model-minimum
 entry point, then a 4×4 grid spanning the clipped entry box. Both grids are completed
 regardless of observed M1; M2 eligibility remains active for training and selection.
 Grid initialization bypasses M1 neighborhood exclusions and step limits. Subsequent
@@ -144,7 +145,7 @@ in this mode. Require `stage_1_max_acquisitions >= 17` and
 backends must contain every grid location. The grids are measured even when a
 location coincides with an earlier baseline, entry, or Stage 1 observation.
 
-Complete all initial measurements before checking entry. Then minimize the M1 GP
+In BO mode, complete all initial measurements before checking entry. Then minimize the M1 GP
 posterior mean over the global bounds after every acquisition. Enter Stage 2 when
 that minimum is at or below `stage_2_entrance_m1` or `stage_1_max_acquisitions` is
 exhausted. Measure the posterior minimum as the first Stage 2 point in either case.
@@ -154,6 +155,21 @@ the predicted M1 and position. Stage 1 does not terminate on `stage_2_min_ei`; w
 distinct candidate remains it reimages the best M1 until a transition condition
 is met. Its acquisition budget is part of `max_acquisitions`, which also reserves
 `confirmations` final images and at least one Stage 2 acquisition.
+
+With `stage_1_optimizer: "quadratic"`, use grid initialization and fit
+`M1 = a + b*u + c*v + d*u² + e*u*v + f*v²` by ordinary least squares to all finite
+Stage 1 M1 measurements, including the baseline and repeated locations. Coordinates
+`u` and `v` map the global bounds to `[-1, 1]` for conditioning. Measure the global
+minimum over the bounded rectangle and refit with the new observation. The bounded
+minimum is selected from corners, edge minima, and the interior stationary point;
+concave or indefinite fits can therefore select an edge or corner. Continuous targets
+can revisit earlier positions. After the last Stage 1 acquisition, refit once more
+and acquire the Stage 2 entry image at that final minimum. This mode uses the full
+Stage 1 budget, with no early M1-threshold transition. A 20-image Stage 1 budget
+contains the baseline, 16 grid images, and three quadratic-minimum images.
+`quadratic_model` log events store normalized coefficients, training acquisition IDs,
+the minimum position, and predicted M1. Stage 2 retains its existing initialization,
+eligibility, GP noise, box adaptation, and BO rules.
 
 Candidate grids cover the global bounds in Stage 1 and the clipped local box in
 Stage 2. Both spacings must be finite and positive. Grids start at the lower bounds
@@ -410,7 +426,8 @@ gets a unique filename so repeated confirmations retain separate files.
 
 Observation stages are `baseline`, `stage1_init`, `stage1`, `stage_2_init`,
 `stage_2`, and `final`. The `_init` stages identify initialization measurements;
-`stage1` and `stage_2` identify Bayesian optimization of M1 and M2, respectively.
+`stage1` identifies M1 refinement by the configured optimizer; `stage_2` identifies
+Bayesian optimization of M2.
 Stage 2 transition and model records also use `stage_2`.
 
 Every acquisition logs measured position, commanded target, metrics, image path, a textual observation, a comparison with the preceding image,

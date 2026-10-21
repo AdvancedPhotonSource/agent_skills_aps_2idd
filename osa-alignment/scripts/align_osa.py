@@ -38,6 +38,7 @@ class Settings:
     gp_length_scale_bounds: tuple[float, float] = (0.5, 10.)
     bo_initial_samples: int = 5
     bo_initialization: str = "random"
+    stage_1_optimizer: str = "bo"
     gp_noise: float = 0.05
     stage_2_gp_stage_1_noise_multiplier: float = 3.0
     ei_xi: float = 0.0
@@ -89,6 +90,10 @@ class Settings:
             raise ValueError("stage_2_eligibility_m1 must be finite and positive")
         if self.bo_initialization not in {"random", "grid"}:
             raise ValueError("bo_initialization must be 'random' or 'grid'")
+        if self.stage_1_optimizer not in {"bo", "quadratic"}:
+            raise ValueError("stage_1_optimizer must be 'bo' or 'quadratic'")
+        if self.stage_1_optimizer == "quadratic" and self.bo_initialization != "grid":
+            raise ValueError("Quadratic Stage 1 requires grid initialization")
         if self.bo_initialization == "grid":
             if self.stage_1_max_acquisitions < 17:
                 raise ValueError("Grid initialization requires a baseline plus 16 Stage 1 measurements")
@@ -184,6 +189,47 @@ def candidate_grid(lo, hi, spacing):
             axis = np.append(axis, b)
         axes.append(axis)
     return np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 2)
+
+
+def fit_quadratic(observations, settings):
+    """Least-squares M1 quadratic and its global minimum over the bounded box.
+
+    Coefficients multiply [1, u, v, u², uv, v²], with coordinates scaled to [-1, 1].
+    Corners, edge minima, and an interior stationary point cover all quadratic minima.
+    """
+    data = objective_observations(observations, settings, "primary_metric")
+    if len(data) < 6:
+        raise ValueError("Quadratic fit needs six independent finite M1 observations")
+    bounds = np.asarray(settings.bounds, float)
+    origin, scale = bounds.mean(axis=1), np.diff(bounds, axis=1).ravel() / 2
+    points = (np.array([o["position"] for o in data]) - origin) / scale
+
+    def features(points):
+        u, v = np.asarray(points).T
+        return np.column_stack([np.ones_like(u), u, v, u*u, u*v, v*v])
+
+    coefficients, _, rank, _ = np.linalg.lstsq(
+        features(points), [float(o["metrics"]["primary_metric"]) for o in data], rcond=None)
+    if rank < 6:
+        raise ValueError("Quadratic fit needs six independent finite M1 observations")
+    c = coefficients
+    candidates = [points[-1], *[(u, v) for u in (-1., 1.) for v in (-1., 1.)]]
+    for edge in (-1., 1.):
+        if c[5] > 0:
+            candidates.append([edge, np.clip(-(c[2] + c[4]*edge) / (2*c[5]), -1, 1)])
+        if c[3] > 0:
+            candidates.append([np.clip(-(c[1] + c[4]*edge) / (2*c[3]), -1, 1), edge])
+    try:
+        stationary = np.linalg.solve([[2*c[3], c[4]], [c[4], 2*c[5]]], -c[1:3])
+        if np.all(np.abs(stationary) <= 1):
+            candidates.append(stationary)
+    except np.linalg.LinAlgError:
+        pass  # A singular quadratic has a minimum among the boundary candidates.
+    candidates = np.clip(np.asarray(candidates), -1, 1)
+    predictions = features(candidates) @ c
+    best = int(np.argmin(predictions))
+    target = np.clip(origin + scale*candidates[best], bounds[:, 0], bounds[:, 1])
+    return coefficients, target, float(predictions[best])
 
 
 class Controller:
@@ -474,27 +520,40 @@ class Controller:
                                      f"Measure M1 initialization grid location {stage1_grid_count + 1}/16.", "stage1_init")
                         stage1_grid_count += 1
                         continue
-                    gp, fitted = fit_objective(self.history, self.s, "primary_metric")
-                    self.record("bo_model", stage=stage, objective="primary_metric",
-                                length_scales=np.asarray(gp.kernel_.length_scale).tolist(),
-                                length_scales_fitted=fitted, training_count=len(gp.X_train_),
-                                training_acquisitions=[o["acquisition"] for o in
-                                    objective_observations(self.history, self.s, "primary_metric")],
-                                exclusion_acquisitions=[])
+                    quadratic = self.s.stage_1_optimizer == "quadratic"
+                    if quadratic:
+                        coefficients, stage2_center, predicted_m1 = fit_quadratic(self.history, self.s)
+                        prediction = {"quadratic_minimum_m1": predicted_m1}
+                        self.record("quadratic_model", stage=stage, coefficients=coefficients.tolist(),
+                                    coordinate_system="bounds normalized to [-1, 1]",
+                                    terms=["1", "u", "v", "u^2", "uv", "v^2"],
+                                    training_acquisitions=[o["acquisition"] for o in
+                                        objective_observations(self.history, self.s, "primary_metric")],
+                                    position=stage2_center.tolist(), **prediction)
+                    else:
+                        gp, fitted = fit_objective(self.history, self.s, "primary_metric")
+                        self.record("bo_model", stage=stage, objective="primary_metric",
+                                    length_scales=np.asarray(gp.kernel_.length_scale).tolist(),
+                                    length_scales_fitted=fitted, training_count=len(gp.X_train_),
+                                    training_acquisitions=[o["acquisition"] for o in
+                                        objective_observations(self.history, self.s, "primary_metric")],
+                                    exclusion_acquisitions=[])
                     if grid_mode or self.acquisitions >= self.s.bo_initial_samples:
-                        stage2_center = self.posterior_mean_center(gp)
-                        predicted_m1 = float(gp.predict(stage2_center[None, :])[0])
-                        threshold_met = predicted_m1 <= self.s.stage_2_entrance_m1
+                        if not quadratic:
+                            stage2_center = self.posterior_mean_center(gp)
+                            predicted_m1 = float(gp.predict(stage2_center[None, :])[0])
+                            prediction = {"posterior_mean_m1": predicted_m1}
+                        threshold_met = not quadratic and predicted_m1 <= self.s.stage_2_entrance_m1
                         budget_met = self.acquisitions >= self.s.stage_1_max_acquisitions
                         self.record("stage_2_entry_check", position=stage2_center.tolist(),
-                                    posterior_mean_m1=predicted_m1, threshold_met=threshold_met,
-                                    stage1_acquisitions=self.acquisitions)
+                                    threshold_met=threshold_met,
+                                    stage1_acquisitions=self.acquisitions, **prediction)
                         if threshold_met or budget_met:
                             stage, bo_started = "stage_2", True
                             self.record("stage_transition", stage=stage, from_stage="stage1",
                                         reason="M1 posterior mean threshold reached" if threshold_met else "stage 1 budget exhausted",
                                         stage1_acquisitions=self.acquisitions,
-                                        position=stage2_center.tolist(), posterior_mean_m1=predicted_m1)
+                                        position=stage2_center.tolist(), **prediction)
                             self.record("search_box", stage=stage, center=stage2_center.tolist(),
                                         centering="initialization_anchor")
                             if grid_mode:
@@ -502,11 +561,16 @@ class Controller:
                             acquisition_stage = "stage_2_init" if grid_mode or self.s.bo_initial_samples else "stage_2"
                             if acquisition_stage == "stage_2":
                                 self.travel_to(stage2_center)
-                            obs = self.acquire(stage2_center, "Measure Stage 2 entry at the M1 posterior mean minimum.",
+                            entry_model = "quadratic" if quadratic else "posterior mean"
+                            obs = self.acquire(stage2_center, f"Measure Stage 2 entry at the M1 {entry_model} minimum.",
                                                acquisition_stage)
                             if acquisition_stage == "stage_2_init" and feasible(obs, self.s):
                                 initial_samples += 1
                             continue
+                    if quadratic:
+                        self.travel_to(stage2_center)
+                        self.acquire(stage2_center, "Measure the refitted M1 quadratic minimum.", "stage1")
+                        continue
                     random_initializing = not grid_mode and self.acquisitions < self.s.bo_initial_samples
                     pool = self.stage1_candidates(initial=random_initializing)
                     if not len(pool):

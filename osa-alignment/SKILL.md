@@ -122,7 +122,7 @@ a localized bright spot.
 ### Run alignment
 
 [scripts/align_osa.py](scripts/align_osa.py) aligns the OSA in two stages.
-Stage 1 uses Bayesian optimization to minimize M1 across the full `bounds` in
+By default, Stage 1 uses Bayesian optimization to minimize M1 across the full `bounds` in
 the alignment config, including finite scores from failed fits. It completes all
 initial measurements, then enters Stage 2 when the global minimum of the M1 GP
 posterior mean meets `stage_2_entrance_m1` or `stage_1_max_acquisitions` is used up.
@@ -157,6 +157,13 @@ still controls GP training and final selection. `bo_initial_samples` applies to
 random mode. Grid mode requires a Stage 1 budget of at least 17 and a total budget
 of at least `stage_1_max_acquisitions + 17 + confirmations`. Recorded backends
 must provide every grid location.
+Set `stage_1_optimizer` to `quadratic` for sequential quadratic minimization after
+the Stage 1 grid (`bo_initialization: "grid"`). The default is `bo`. Quadratic mode
+fits all finite M1 observations, including the baseline and repeats, with a full
+2D least-squares quadratic. Each new measurement is at its minimum over `bounds`.
+Refit after each image until the Stage 1 budget is used, then start Stage 2 at the
+final refitted minimum. Stage 2 keeps its grid initialization and M2 BO behavior.
+Quadratic targets use continuous coordinates and may revisit measured locations.
 Set `stage_1_grid_spacing` and `stage_2_grid_spacing` for the acquisition candidate
 grids (defaults: 1 and 0.1 in motor units, respectively). Stage 1 covers the global
 bounds; Stage 2 covers its clipped local box. EI is evaluated at every surviving
