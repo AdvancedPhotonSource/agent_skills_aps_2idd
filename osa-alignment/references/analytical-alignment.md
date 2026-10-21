@@ -99,7 +99,7 @@ motor units and limits that must be replaced with appropriate local values:
 | `max_acquisitions` | 40 | Total budget including baseline and final confirmation images; transit moves take no images |
 | `confirmations` | 2 | Number of final reimages; at least two |
 | `readback_tolerance` | 0.001 | Maximum Euclidean readback discrepancy and per-axis allowance outside global bounds, in motor units; commanded targets remain within exact bounds |
-| `stage_2_bo_halfwidth` | [5, 5] | Half-widths of a symmetric motor search box centered on the best eligible observation |
+| `stage_2_bo_halfwidth` | [5, 5] | Half-widths of the motor search box, anchored during initialization and then centered on the M2 GP posterior-mean minimum |
 | `bo_initial_samples` | 5 | Stage 1 initial measurements including baseline, and Stage 2 eligible random measurements before EI; 0 starts EI when a training observation exists |
 | `gp_length_scale` | [2.5, 2.5] | Initial Matérn-5/2 length scales and fallback before three distinct eligible locations, in motor units |
 | `gp_length_scale_bounds` | [0.5, 10] | Positive finite lower/upper bounds shared by both fitted spatial scales, in motor units |
@@ -142,17 +142,28 @@ verified at every move and before/after acquisitions. Faults stop the run.
 
 ### Stage 2: local M2 optimization
 
-Minimize M2 in the local box around the best eligible observation. Initialize with
-`bo_initial_samples` eligible random measurements at distinct motor locations;
-rejected attempts consume the total budget. Stage 1 observations can train the
+Minimize M2 in a local box. During random initialization, keep the box centered
+on the best eligible observation at Stage 2 entry. After collecting
+`bo_initial_samples` eligible random measurements at distinct motor locations,
+recenter the box on a numerical minimum of the M2 GP posterior mean each iteration. Rejected
+attempts consume the total budget. Stage 1 observations can train the
 M2 GP but do not count toward Stage 2 random initialization. An explicit M2 target
 can end Stage 2 early, subject to final confirmation.
 
-On budget entry without an eligible M2 observation, center the local box on the
-lowest observed M1 and sample randomly until an eligible M2 is available. Apply
-the same Stage 2 exclusions throughout. If the exclusions or travel limits leave
+On budget entry without an eligible M2 observation, anchor the initialization
+box at the lowest observed M1 and sample randomly until initialization is complete
+and an eligible M2 is available. Apply the same Stage 2 exclusions throughout.
+If the exclusions or travel limits leave
 no candidates, report that reason and return to the lowest M1 observation for
 final confirmation; infeasible geometry remains unconfirmed.
+
+Find the posterior-mean minimum within the current box, clipped to global bounds
+and subject to M1 neighborhood exclusions. A 17-by-17 grid, the current center,
+and measured positions seed five constrained local optimizations. The center can
+lie between measurements; updating it takes no motor move or image. A flat
+posterior retains the center when it remains allowed. Each `search_box` event
+records the center and whether it is anchored for initialization or follows the
+posterior mean.
 
 One Matérn-5/2 GP models M2. All valid observations with finite M1 at or below
 the threshold and finite M2 enter its training set, including worse M2 values
@@ -184,7 +195,7 @@ initialization ignores `min_step`/`max_step`, moves directly to each sampled
 target, and avoids exact duplicate measurements. Global bounds, readback
 verification, the local box, and M1 exclusions still apply. For subsequent EI sampling, filter displacements from the actual
 readback to `[min_step, max_step]` and exclude points within half `min_step` of
-any previously measured position. The local box moves with the best eligible observation.
+any previously measured position. The local box follows the posterior-mean minimum after initialization.
 Continuous candidates are uniform random proposals within the box; exact-grid
 replay uses available recorded locations. A depleted filtered candidate pool
 ends the search with an explicit reason, including incomplete initialization

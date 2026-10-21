@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from scipy.optimize import minimize
 from scipy.stats import norm
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
@@ -294,6 +295,50 @@ class Controller:
             pool = pool[np.all(np.sum(offsets ** 2, axis=2) > 1., axis=1)]
         return pool
 
+    def posterior_mean_center(self, gp, center):
+        """Numerically minimize posterior mean within the current unexcluded box."""
+        center = np.asarray(center, float)
+        bounds = np.asarray(self.s.bounds)
+        lo = np.maximum(bounds[:, 0], center - self.s.stage_2_bo_halfwidth)
+        hi = np.minimum(bounds[:, 1], center + self.s.stage_2_bo_halfwidth)
+        rejected = np.array([o['position'] for o in self.history
+                             if not eligible_geometry(o, self.s)]).reshape(-1, 2)
+
+        def clearance(points):
+            offsets = (np.asarray(points)[..., None, :] - rejected) / self.length_scales
+            return np.sum(offsets ** 2, axis=-1) - 1.
+
+        def allowed(points):
+            return (np.all((points >= lo) & (points <= hi), axis=1)
+                    & np.all(clearance(points) >= -1e-8, axis=1))
+
+        grid = np.stack(np.meshgrid(*[np.linspace(a, b, 17) for a, b in zip(lo, hi)]), axis=-1).reshape(-1, 2)
+        measured = np.array([o['position'] for o in self.history]).reshape(-1, 2)
+        pool = np.vstack([center, grid, measured])
+        pool = pool[allowed(pool)]
+        if not len(pool):
+            return center.copy()
+        means = gp.predict(pool)
+        scale = float(np.ptp(means))
+        if scale == 0:
+            return pool[0].copy()
+        offset = float(np.min(means))
+
+        def objective(point):
+            return (float(gp.predict(np.asarray(point)[None, :])[0]) - offset) / scale
+
+        constraints = [{'type': 'ineq', 'fun': clearance}] if len(rejected) else []
+        refined = []
+        for start in pool[np.argsort(means, kind='stable')[:5]]:
+            result = minimize(objective, start, method='SLSQP', bounds=list(zip(lo, hi)),
+                              constraints=constraints, options={'ftol': 1e-10, 'maxiter': 100})
+            point = np.clip(result.x, lo, hi)
+            if result.success and allowed(point[None, :])[0]:
+                refined.append(point)
+        if refined:
+            pool = np.vstack([pool, refined])
+        return pool[np.argmin(gp.predict(pool))].copy()
+
     def stage1_candidates(self, *, initial=False):
         """Propose throughout the global bounds without geometry exclusions."""
         bounds = np.asarray(self.s.bounds)
@@ -367,6 +412,7 @@ class Controller:
                     budget_met = self.acquisitions >= self.s.stage_1_max_acquisitions
                     if threshold_met or budget_met:
                         stage, bo_started = "stage_2", True
+                        stage2_center = np.array((self.best or primary_best)['position'], float)
                         self.record("stage_transition", stage="stage_2", from_stage="stage1",
                                     reason="M1 threshold reached" if threshold_met else "stage 1 budget exhausted",
                                     stage1_acquisitions=self.acquisitions)
@@ -412,7 +458,11 @@ class Controller:
                                 exclusion_acquisitions=[o["acquisition"] for o in self.history
                                     if not eligible_geometry(o, self.s)])
                 initializing = initial_samples < self.s.bo_initial_samples or gp is None
-                pool = self.candidates(incumbent, initial=initializing)
+                if not initializing:
+                    stage2_center = self.posterior_mean_center(gp, stage2_center)
+                self.record("search_box", stage="stage_2", center=stage2_center.tolist(),
+                            centering="initialization_anchor" if initializing else "posterior_mean")
+                pool = self.candidates({'position': stage2_center}, initial=initializing)
                 if not len(pool):
                     reason = "no sampleable candidates after travel, spacing, and M1 exclusions"
                     if initial_samples < self.s.bo_initial_samples or gp is None:

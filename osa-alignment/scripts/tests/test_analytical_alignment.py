@@ -248,6 +248,103 @@ def test_initialization_counts_eligible_random_measurements_and_reuses_stage1(tm
     assert result['acquisitions'] == 11
 
 
+@pytest.mark.parametrize('eligible_entry', [True, False])
+def test_stage2_box_stays_at_entry_until_eligible_initialization_finishes(tmp_path, monkeypatch, eligible_entry):
+    backend = SyntheticBackend([0, 0])
+    targets = [[4, 4], [-4, -4], [5, 5], [8, 8], [12, 12]]
+    backend.candidate_positions = np.array([[0, 0], *targets], float)
+
+    def measured(p):
+        invalid = backend.acquisitions == 3 or (backend.acquisitions == 1 and not eligible_entry)
+        obs = observation(p, invalid=invalid)
+        obs['metrics']['primary_metric'] = .2 if invalid else .01
+        if not invalid:
+            obs['metrics']['secondary_metric'] = 100. - backend.acquisitions
+        return obs
+
+    c = Controller(settings(stage_1_max_acquisitions=1, bo_initial_samples=2,
+                            stage_2_target_m2=None, max_acquisitions=8, max_step=30),
+                   backend, tmp_path / 'log', measured)
+    candidates = c.candidates
+    centers, initializing = [], []
+    posterior_calls = []
+
+    def posterior_center(gp, center):
+        posterior_calls.append((len(c.history), np.array(center)))
+        return np.array([4.5, 4.5] if len(posterior_calls) == 1 else [7.5, 7.5])
+
+    def choose(incumbent, *, initial=False):
+        pool = candidates(incumbent, initial=initial)
+        target = np.array(targets[len(centers)], float)
+        centers.append(incumbent['position'])
+        initializing.append(initial)
+        assert np.any(np.all(pool == target, axis=1))
+        return target[None, :]
+
+    monkeypatch.setattr(c, 'candidates', choose)
+    monkeypatch.setattr(c, 'posterior_mean_center', posterior_center)
+    result = c.run()
+    assert result['status'] == 'best_found'
+    assert initializing == [True, True, True, False, False]
+    np.testing.assert_array_equal(centers, [[0, 0], [0, 0], [0, 0], [4.5, 4.5], [7.5, 7.5]])
+    assert [count for count, _ in posterior_calls] == [4, 5]
+    np.testing.assert_array_equal([center for _, center in posterior_calls], [[0, 0], [4.5, 4.5]])
+    assert [o['stage'] for o in c.history] == (
+        ['baseline'] + ['stage_2_init'] * 3 + ['stage_2'] * 2 + ['final'] * 2)
+    assert [o['bo_eligible'] for o in c.history[1:4]] == [True, False, True]
+    boxes = [e for e in events(c) if e['event'] == 'search_box']
+    np.testing.assert_array_equal([e['center'] for e in boxes], centers)
+    assert [e['centering'] for e in boxes] == ['initialization_anchor'] * 3 + ['posterior_mean'] * 2
+    assert result['final_readback'] == [12., 12.]
+
+
+def test_posterior_center_can_be_unmeasured_and_differs_from_noisy_best(tmp_path):
+    c = Controller(settings(), SyntheticBackend([0, 0]), tmp_path / 'log')
+    c.best = observation([4, 4])
+    c.best['metrics']['primary_metric'] = .01
+    c.best['metrics']['secondary_metric'] = -100.
+    c.history = [observation([0, 0]), c.best]
+
+    class Posterior:
+        def predict(self, points):
+            return 500000. + 1000. * np.sum((np.asarray(points) - [1.25, -.75]) ** 2, axis=1)
+
+    center = c.posterior_mean_center(Posterior(), [0, 0])
+    np.testing.assert_allclose(center, [1.25, -.75], atol=1e-4)
+    assert not any(np.allclose(center, o['position']) for o in c.history)
+    assert c.backend.moves == []
+
+
+def test_posterior_center_respects_current_box_global_bounds_and_m1_exclusions(tmp_path):
+    c = Controller(settings(), SyntheticBackend([13, 0]), tmp_path / 'log')
+
+    class Posterior:
+        def predict(self, points):
+            return np.sum((np.asarray(points) - [20, -10]) ** 2, axis=1)
+
+    np.testing.assert_allclose(c.posterior_mean_center(Posterior(), [13, 0]), [15, -5], atol=1e-4)
+    c.history = [observation([0, 0], invalid=True)]
+    c.length_scales = np.array([1., 2.])
+
+    class ExcludedMinimum:
+        def predict(self, points):
+            return np.sum(np.asarray(points) ** 2, axis=1)
+
+    center = c.posterior_mean_center(ExcludedMinimum(), [0, 0])
+    assert np.sum((center / c.length_scales) ** 2) >= 1 - 1e-6
+    np.testing.assert_allclose(np.linalg.norm(center), 1., atol=1e-4)
+
+
+def test_flat_posterior_preserves_box_center(tmp_path):
+    c = Controller(settings(), SyntheticBackend([0, 0]), tmp_path / 'log')
+
+    class Posterior:
+        def predict(self, points):
+            return np.full(len(points), 500000.)
+
+    np.testing.assert_array_equal(c.posterior_mean_center(Posterior(), [.13, -.27]), [.13, -.27])
+
+
 @pytest.mark.parametrize('invalid', [False, True])
 def test_initialization_budget_exhaustion_reserves_final_confirmations(tmp_path, invalid):
     backend = SyntheticBackend([0, 0])
