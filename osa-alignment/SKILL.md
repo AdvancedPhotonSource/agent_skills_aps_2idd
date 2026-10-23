@@ -83,6 +83,10 @@ otherwise they are fitted. Add `--min-eccentricity E` to require both ellipses t
 have focal-distance-to-major-semiaxis ratio \(c/a\ge E\), where \(0\le E<1\).
 Omit it for an unconstrained fit. See [metric details](references/analytical-alignment.md#quantitative-evaluation)
 for normalization, fit diagnostics, and options. 
+Use `--pre-blur-sigma 1` (or `evaluator.pre_blur_sigma: 1`) to apply a 1-pixel
+Gaussian blur before intensity normalization, edge detection, and ellipse fitting.
+The default is 0, which disables pre-blurring. Canny retains its own `sigma`
+smoothing (default 2 pixels). M2 integrates the original image inside the fitted hole.
 **Supply the best guess of the semiaxes whenever possible as they are important for accurate fitting**.
 
 #### Definitions and interpretation of the M1 and M2 metrics

@@ -37,6 +37,13 @@ hole. Nearly circular ellipses have poorly determined orientation. Extra shape
 freedom can absorb actual misalignment, so inspect fitted aspect ratios and the
 image as well as the residual.
 
+Set `--pre-blur-sigma` (or `evaluator.pre_blur_sigma` in the alignment config)
+to smooth the grayscale image before percentile normalization and geometry fitting.
+It is a nonnegative Gaussian standard deviation in pixels; 0 disables it.
+This precedes Canny's own `sigma` smoothing (default 2 pixels). All geometry
+initialization and edge fitting use the pre-blurred image; hole and annulus
+intensities are measured on the original image using the resulting fitted masks.
+
 The script detects Canny edges, distinguishes inward and outward intensity
 transitions, and fits the concentric ellipses. Lower scores are better:
 

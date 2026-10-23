@@ -35,6 +35,7 @@ class Config:
     max_gap_degrees: float = 90.0
     background: float = 0.0
     intensity_normalizer: float = 1.0
+    pre_blur_sigma: float = 0.0
 
     def validate(self):
         if self.min_eccentricity is not None:
@@ -52,6 +53,8 @@ class Config:
                     ratio = min(axes) / max(axes)
                     if ratio > np.sqrt(1 - self.min_eccentricity**2):
                         raise ValueError("Fixed axes do not meet min_eccentricity")
+        if not np.isfinite(self.pre_blur_sigma) or self.pre_blur_sigma < 0:
+            raise ValueError("pre_blur_sigma must be nonnegative and finite")
         if not (np.isfinite(self.sigma) and self.sigma > 0):
             raise ValueError("sigma must be positive and finite")
         if not 0 < self.edge_low < self.edge_high <= 1:
@@ -158,10 +161,11 @@ def evaluate(image: np.ndarray, config: Config | None = None) -> dict:
                   image_shape=list(image.shape), fit=None,
                   secondary_metric=float("inf"),
                   geometry_score=float("inf"), hole_integral=None)
-    floor, ceiling = np.percentile(image, [10, 99.5])
+    fit_image = ndi.gaussian_filter(image, config.pre_blur_sigma) if config.pre_blur_sigma else image
+    floor, ceiling = np.percentile(fit_image, [10, 99.5])
     base_reasons = ["No usable intensity contrast"] if ceiling <= floor else []
     normalized = (np.zeros_like(image) if ceiling <= floor else
-                  np.clip((image - floor) / (ceiling - floor), 0, 1))
+                  np.clip((fit_image - floor) / (ceiling - floor), 0, 1))
     edges = canny(normalized, sigma=config.sigma,
                   low_threshold=config.edge_low, high_threshold=config.edge_high)
     smooth = ndi.gaussian_filter(normalized, config.sigma)
@@ -364,6 +368,8 @@ def main():
     parser.add_argument("--outer-axes", type=float, nargs=2, metavar=("A", "B"), help="Fixed outer ellipse semiaxes in pixels; requires inner axes")
     parser.add_argument("--min-eccentricity", type=float, help="Minimum c/a for both fitted ellipses; 0 allows circles")
     parser.add_argument("--sigma", type=float, default=2.0, help="Canny smoothing sigma in pixels")
+    parser.add_argument("--pre-blur-sigma", type=float, default=0.0,
+                        help="Additional Gaussian blur before normalization and geometry fitting; 0 disables; M2 uses original intensities")
     parser.add_argument("--edge-low", type=float, default=0.04)
     parser.add_argument("--edge-high", type=float, default=0.10)
     parser.add_argument("--edge-tolerance", type=float, help="Support distance in pixels; default max(2, 0.04 * outer equal-area radius)")
