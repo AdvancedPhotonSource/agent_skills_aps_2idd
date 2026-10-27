@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Align an OSA using global M1 and local M2 Bayesian optimization."""
+"""Align an OSA using global M1 optimization and local M2 Bayesian optimization."""
 from __future__ import annotations
 
 import argparse
@@ -29,7 +29,7 @@ class Settings:
     evaluator: dict = field(default_factory=dict)
     stage_2_entrance_m1: float = 0.02
     stage_2_eligibility_m1: float | None = None
-    stage_1_max_acquisitions: int = 15
+    stage_1_max_acquisitions: int = 20
     max_acquisitions: int = 40
     confirmations: int = 2
     readback_tolerance: float = 0.001
@@ -37,8 +37,8 @@ class Settings:
     gp_length_scale: tuple[float, float] = (2.5, 2.5)
     gp_length_scale_bounds: tuple[float, float] = (0.5, 10.)
     bo_initial_samples: int = 5
-    bo_initialization: str = "random"
-    stage_1_optimizer: str = "bo"
+    bo_initialization: str = "grid"
+    stage_1_optimizer: str = "quadratic"
     gp_noise: float = 0.05
     stage_2_gp_stage_1_noise_multiplier: float = 3.0
     ei_xi: float = 0.0

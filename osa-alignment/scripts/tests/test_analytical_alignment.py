@@ -46,6 +46,8 @@ class SyntheticBackend:
 
 
 def settings(**options):
+    options.setdefault("bo_initialization", "random")
+    options.setdefault("stage_1_optimizer", "bo")
     options.setdefault("stage_1_max_acquisitions", min(3, options.get("max_acquisitions", 40) - 3))
     options.setdefault("bo_initial_samples", min(5, options["stage_1_max_acquisitions"]))
     return Settings(**dict(dict(units="um", bounds=[[-15, 15], [-15, 15]], max_step=5.,

@@ -1,7 +1,8 @@
-# Bayesian OSA alignment
+# Two-stage OSA alignment
 
 The workflow uses `evaluate_alignment.py` for ellipse metrics and
-`align_osa.py` for two-stage Bayesian optimization. Run commands from the skill
+`align_osa.py` for quadratic M1 optimization followed by M2 Bayesian optimization.
+Run commands from the skill
 directory. Install the locked dependencies in the local environment first:
 
 ```sh
@@ -85,11 +86,13 @@ motor units and limits that must be replaced with appropriate local values:
   "max_step": 5,
   "min_step": 0.5,
   "stage_2_entrance_m1": 0.02,
-  "stage_1_max_acquisitions": 15,
+  "stage_1_max_acquisitions": 20,
   "max_acquisitions": 40,
   "confirmations": 2,
   "stage_2_bo_halfwidth": [5, 5],
   "bo_initial_samples": 5,
+  "bo_initialization": "grid",
+  "stage_1_optimizer": "quadratic",
   "stage_1_grid_spacing": 1.0,
   "stage_2_grid_spacing": 0.1,
   "gp_length_scale": [2.5, 2.5],
@@ -105,14 +108,14 @@ motor units and limits that must be replaced with appropriate local values:
 | `evaluator` | `{}` | Current-run evaluator options; omit semiaxes to fit them per image, or supply both to fix them |
 | `stage_2_entrance_m1` | 0.02 | Threshold on the minimum M1 posterior mean for Stage 2 entry |
 | `stage_2_eligibility_m1` | null | Observed M1 threshold for M2 training, final selection, and neighborhood exclusions; null uses `stage_2_entrance_m1` |
-| `stage_1_max_acquisitions` | 15 | Stage 1 acquisition budget, including baseline; positive integer leaving at least one Stage 2 acquisition plus final confirmations |
+| `stage_1_max_acquisitions` | 20 | Stage 1 acquisition budget, including baseline; grid mode requires at least 17 images and reserves a full Stage 2 grid plus confirmations |
 | `max_acquisitions` | 40 | Total budget including baseline and final confirmation images; transit moves take no images |
 | `confirmations` | 2 | Number of final reimages; at least two |
 | `readback_tolerance` | 0.001 | Maximum Euclidean readback discrepancy and per-axis allowance outside global bounds, in motor units; commanded targets remain within exact bounds |
 | `stage_2_bo_halfwidth` | [5, 5] | Half-widths of the motor search box, anchored during initialization and then centered on the M2 GP posterior-mean minimum |
 | `bo_initial_samples` | 5 | Stage 1 initial measurements including baseline (must fit its budget), and Stage 2 eligible initialization measurements including entry before EI; 0 starts EI when a training observation exists |
-| `bo_initialization` | `random` | `random` uses `bo_initial_samples`; `grid` measures a regular 4×4 initialization grid in each stage, plus baseline and Stage 2 entry |
-| `stage_1_optimizer` | `bo` | `bo` uses the M1 GP and EI; `quadratic` requires grid initialization, refits a full M1 quadratic after each image, and measures its bounded minimum until the Stage 1 budget |
+| `bo_initialization` | `grid` | `random` uses `bo_initial_samples` and requires `stage_1_optimizer: "bo"`; `grid` measures a regular 4×4 initialization grid in each stage, plus baseline and Stage 2 entry |
+| `stage_1_optimizer` | `quadratic` | `bo` uses the M1 GP and EI; `quadratic` requires grid initialization, refits a full M1 quadratic after each image, and measures its bounded minimum until the Stage 1 budget |
 | `gp_length_scale` | [2.5, 2.5] | Initial Matérn-5/2 length scales and fallback before three distinct eligible locations, in motor units |
 | `gp_length_scale_bounds` | [0.5, 10] | Positive finite lower/upper bounds shared by both fitted spatial scales, in motor units |
 | `gp_noise` | 0.05 | Observation standard deviation in standardized GP target units; squared for GP alpha |
@@ -131,7 +134,7 @@ with repeated measurements at the local instrument; they are not universal.
 
 ### Stage 1: global M1 optimization
 
-Minimize M1 using a Matérn-5/2 Gaussian process and expected improvement over the
+With `stage_1_optimizer: "bo"`, minimize M1 using a Matérn-5/2 Gaussian process and expected improvement over the
 full configured `bounds`. `stage_2_bo_halfwidth` and Stage 2 M1 neighborhood exclusions
 do not restrict this domain. All finite M1 observations train this GP, including
 failed fits and scores above the entry threshold. Use `gp_noise` to tolerate
@@ -163,7 +166,7 @@ distinct candidate remains it reimages the best M1 until a transition condition
 is met. Its acquisition budget is part of `max_acquisitions`, which also reserves
 `confirmations` final images and at least one Stage 2 acquisition.
 
-With `stage_1_optimizer: "quadratic"`, use grid initialization and fit
+With the default `stage_1_optimizer: "quadratic"`, use grid initialization and fit
 `M1 = a + b*u + c*v + d*u² + e*u*v + f*v²` by ordinary least squares to all finite
 Stage 1 M1 measurements, including the baseline and repeated locations. Coordinates
 `u` and `v` map the global bounds to `[-1, 1]` for conditioning. Measure the global

@@ -4,7 +4,7 @@ import pytest
 
 from test_analytical_alignment import Controller, SyntheticBackend, events, observation, settings
 from test_grid_initialization import grid_settings
-from align_osa import fit_quadratic
+from align_osa import Settings, fit_quadratic
 
 
 def samples(function):
@@ -69,8 +69,8 @@ def test_refits_after_each_measurement_and_enters_at_final_minimum(tmp_path, mon
         obs['metrics']['primary_metric'] = .001 + .000001*((x-2)**2+2*(y+3)**2) + .0000001*x**3
         return obs
 
-    c = Controller(grid_settings(stage_1_optimizer='quadratic', max_acquisitions=52,
-                                  stage_2_target_m2=1000), backend, tmp_path/'log', measured)
+    c = Controller(Settings(units='um', bounds=[[-15, 15], [-15, 15]], max_step=5,
+                            stage_2_target_m2=1000), backend, tmp_path/'log', measured)
     # Stage 1 must not use a GP minimum; Stage 2 exits at its target after its grid.
     monkeypatch.setattr(c, 'posterior_mean_center', lambda *args: pytest.fail('Unexpected GP minimum'))
     result = c.run()

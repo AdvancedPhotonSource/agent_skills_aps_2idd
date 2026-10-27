@@ -73,7 +73,8 @@ def test_cli_flag_preserves_results_and_saves_final_snapshot(tmp_path, monkeypat
         folder = tmp_path / str(enabled)
         folder.mkdir()
         (folder / "config.json").write_text(json.dumps({"units": "um", "bounds": [[-15, 15], [-15, 15]],
-            "max_step": 5, "stage_2_target_m2": 10, "max_acquisitions": 8, "stage_1_max_acquisitions": 3, "bo_initial_samples": 3}))
+            "max_step": 5, "stage_2_target_m2": 10, "max_acquisitions": 8, "stage_1_max_acquisitions": 3,
+            "bo_initial_samples": 3, "bo_initialization": "random", "stage_1_optimizer": "bo"}))
         backend = SyntheticBackend([0, 0])
         if blocked:
             def fail_acquisition():

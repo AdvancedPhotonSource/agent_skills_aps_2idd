@@ -126,11 +126,13 @@ a localized bright spot.
 ### Run alignment
 
 [scripts/align_osa.py](scripts/align_osa.py) aligns the OSA in two stages.
-By default, Stage 1 uses Bayesian optimization to minimize M1 across the full `bounds` in
-the alignment config, including finite scores from failed fits. It completes all
-initial measurements, then enters Stage 2 when the global minimum of the M1 GP
-posterior mean meets `stage_2_entrance_m1` or `stage_1_max_acquisitions` is used up.
-The first Stage 2 measurement and initial search-box center are at that minimum.
+By default, Stage 1 measures a regular 4×4 grid across the full `bounds`, then
+refits a quadratic to all finite M1 observations after each measurement and
+acquires at its bounded minimum until `stage_1_max_acquisitions` is used up.
+The first Stage 2 measurement and initial search-box center are at the final
+quadratic minimum. Set `stage_1_optimizer: "bo"` to use the M1 GP and enter
+Stage 2 when its minimum posterior mean meets `stage_2_entrance_m1` or the
+Stage 1 budget is used up.
 The baseline counts toward the Stage 1 budget. Stage 2 uses configurable
 initialization and local Bayesian optimization to minimize M2, retaining its
 M1 eligibility constraint and neighborhood exclusions. The final position is the
@@ -140,8 +142,8 @@ Set `stage_2_eligibility_m1` to control M2 eligibility and exclusions separately
 from the entrance threshold; when omitted, it uses `stage_2_entrance_m1`.
 
 No calibration file, centroid vector, reference center, Jacobian, or eta is used.
-The bundled [alignment settings](scripts/alignment.json) allocate 15 of the 40
-acquisitions to Stage 1, use `M1 <= 0.02` for Stage 2 entry and eligibility, and
+The bundled [alignment settings](scripts/alignment.json) allocate 30 of the 60
+acquisitions to Stage 1, use `M1 <= 0.12` for M2 eligibility, and
 reserve two final confirmation images from the total budget. Set `bounds` for
 the intended global search region and motor coordinate frame. Random
 initialization in both stages ignores `min_step`/`max_step`, moving directly to
@@ -152,7 +154,7 @@ final returns use bounded transit moves without acquisitions.
 Set `bo_initial_samples` for both stages (Stage 1 includes the baseline; Stage 2
 counts eligible initialization measurements, including its entry measurement).
 The Stage 1 budget must accommodate `bo_initial_samples`.
-Set `bo_initialization` to `random` (default) or `grid`. Grid initialization
+Set `bo_initialization` to `grid` (default) or `random`. Grid initialization
 measures a regular 4×4 grid spanning each stage's bounds, in addition to the
 baseline and Stage 2 entry measurement. Stage 2 uses the clipped entry box and
 completes all 16 grid measurements before adapting it. Grid initialization moves
@@ -162,16 +164,18 @@ random mode. Grid mode requires a Stage 1 budget of at least 17 and a total budg
 of at least `stage_1_max_acquisitions + 17 + confirmations`. Recorded backends
 must provide every grid location.
 Set `stage_1_optimizer` to `quadratic` for sequential quadratic minimization after
-the Stage 1 grid (`bo_initialization: "grid"`). The default is `bo`. Quadratic mode
+the Stage 1 grid (`bo_initialization: "grid"`). The default is `quadratic`. Quadratic mode
 fits all finite M1 observations, including the baseline and repeats, with a full
 2D least-squares quadratic. Each new measurement is at its minimum over `bounds`.
 Refit after each image until the Stage 1 budget is used, then start Stage 2 at the
 final refitted minimum. Stage 2 keeps its grid initialization and M2 BO behavior.
 Quadratic targets use continuous coordinates and may revisit measured locations.
+For random initialization, set `bo_initialization: "random"` and
+`stage_1_optimizer: "bo"` together.
 Set `stage_1_grid_spacing` and `stage_2_grid_spacing` for the acquisition candidate
 grids (defaults: 1 and 0.1 in motor units, respectively). Stage 1 covers the global
 bounds; Stage 2 covers its clipped local box. EI is evaluated at every surviving
-grid point, and initialization samples randomly from that grid. Recorded replay
+grid point; random-mode initialization samples from that grid. Recorded replay
 uses its available positions.
 Configure image fitting through `evaluator`. Supplying both
 `inner_axes` and `outer_axes` is strongly recommended for accurate fitting.
