@@ -83,6 +83,13 @@ otherwise they are fitted. Add `--min-eccentricity E` to require both ellipses t
 have focal-distance-to-major-semiaxis ratio \(c/a\ge E\), where \(0\le E<1\).
 Omit it for an unconstrained fit. See [metric details](references/analytical-alignment.md#quantitative-evaluation)
 for normalization, fit diagnostics, and options. 
+
+The script can also estimate semiaxes from a well-shaped image with a complete,
+clearly defined annulus. Run the command above without `--inner-axes` or
+`--outer-axes`, check that `valid` is true, and read `fit.inner_axes` and
+`fit.outer_axes` from the JSON output (semiaxes in pixels). These estimates can
+then be supplied as fixed semiaxes for evaluating subsequent alignment images.
+
 Use `--pre-blur-sigma 1` (or `evaluator.pre_blur_sigma: 1`) to apply a 1-pixel
 Gaussian blur before intensity normalization, edge detection, and ellipse fitting.
 The default is 0, which disables pre-blurring. Canny retains its own `sigma`
