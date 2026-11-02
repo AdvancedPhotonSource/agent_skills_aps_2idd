@@ -67,7 +67,6 @@ class Settings:
                    self.stage_2_gp_stage_1_noise_multiplier]
         if (bounds.shape != (2, 2) or not np.isfinite(bounds).all()
             or np.any(bounds[:, 0] >= bounds[:, 1]) or not np.isfinite(numbers).all()
-            or not 0 < self.stage_2_entrance_m1
             or min(self.stage_2_bo_halfwidth) <= 0 or len(self.stage_2_bo_halfwidth) != 2
             or min(self.gp_length_scale) <= 0 or len(self.gp_length_scale) != 2
             or len(self.gp_length_scale_bounds) != 2

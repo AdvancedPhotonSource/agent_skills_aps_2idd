@@ -26,20 +26,21 @@ def test_separate_threshold_controls_training_and_exclusions(tmp_path):
     np.testing.assert_array_equal(c.candidates(good, initial=True), [[.5, 0]])
 
 
-def test_lower_entrance_does_not_trigger_early_or_reject_eligible_m2(tmp_path):
+@pytest.mark.parametrize('entrance', [.002, -1e30])
+def test_lower_entrance_does_not_trigger_early_or_reject_eligible_m2(tmp_path, entrance):
     def measure(p):
         obs = observation(p)
         obs['metrics']['primary_metric'] = .01
         return obs
 
-    c = Controller(settings(stage_2_entrance_m1=.002, stage_2_eligibility_m1=.012,
+    c = Controller(settings(stage_2_entrance_m1=entrance, stage_2_eligibility_m1=.012,
                             bo_initial_samples=2, stage_1_max_acquisitions=3, max_acquisitions=8),
                    SyntheticBackend([0, 0]), tmp_path / 'log', measure)
     result = c.run()
     transition = next(e for e in events(c) if e['event'] == 'stage_transition')
     assert transition['reason'] == 'stage 1 budget exhausted'
     assert transition['stage1_acquisitions'] == 3
-    assert transition['posterior_mean_m1'] > .002
+    assert transition['posterior_mean_m1'] > entrance
     assert all(o['bo_eligible'] and o['bo_rejection_reason'] is None for o in c.history)
     assert result['status'] == 'metric_target_reached'
     assert result['final_readback'] == [0, 0]
@@ -49,3 +50,14 @@ def test_lower_entrance_does_not_trigger_early_or_reject_eligible_m2(tmp_path):
 def test_invalid_eligibility_threshold(value):
     with pytest.raises(ValueError, match='stage_2_eligibility_m1'):
         settings(stage_2_eligibility_m1=value).validate()
+
+
+@pytest.mark.parametrize('value', [float('inf'), float('-inf'), float('nan')])
+def test_entrance_threshold_must_be_finite(value):
+    with pytest.raises(ValueError):
+        settings(stage_2_entrance_m1=value, stage_2_eligibility_m1=.012).validate()
+
+
+def test_negative_entrance_requires_separate_positive_eligibility():
+    with pytest.raises(ValueError, match='stage_2_eligibility_m1'):
+        settings(stage_2_entrance_m1=-1e30).validate()

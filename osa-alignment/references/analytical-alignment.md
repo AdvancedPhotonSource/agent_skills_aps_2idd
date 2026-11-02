@@ -106,7 +106,7 @@ motor units and limits that must be replaced with appropriate local values:
 | `units`, `bounds`, `max_step` | required | Adapter units, `[x_min,x_max]` and `[y_min,y_max]`, maximum Euclidean displacement for moves after random initialization, including final transit |
 | `min_step` | 0.5 | Smallest trial displacement/spacing after random initialization, in motor units; 0 disables minimum spacing while still excluding repeated positions |
 | `evaluator` | `{}` | Current-run evaluator options; omit semiaxes to fit them per image, or supply both to fix them |
-| `stage_2_entrance_m1` | 0.02 | Threshold on the minimum M1 posterior mean for Stage 2 entry |
+| `stage_2_entrance_m1` | 0.02 | Finite threshold on the minimum M1 posterior mean for Stage 2 entry; a very negative value delays entry until the Stage 1 budget, with a separate positive `stage_2_eligibility_m1` |
 | `stage_2_eligibility_m1` | null | Observed M1 threshold for M2 training, final selection, and neighborhood exclusions; null uses `stage_2_entrance_m1` |
 | `stage_1_max_acquisitions` | 20 | Stage 1 acquisition budget, including baseline; grid mode requires at least 17 images and reserves a full Stage 2 grid plus confirmations |
 | `max_acquisitions` | 40 | Total budget including baseline and final confirmation images; transit moves take no images |
